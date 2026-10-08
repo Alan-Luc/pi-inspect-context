@@ -1,0 +1,22 @@
+{
+  "name": "pi-inspect-context",
+  "version": "0.1.0",
+  "description": "A bounded, read-only Pi extension for locating relevant repository context.",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "os": ["darwin", "linux"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typebox": "1.3.27"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts && npm run test:go",
+    "test:go": "cd worker && go test ./..."
+  }
+}
