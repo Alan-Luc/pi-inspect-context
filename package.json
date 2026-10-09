@@ -29,6 +29,7 @@
     "typebox": "1.3.27"
   },
   "scripts": {
+    "bench": "node --experimental-strip-types bench/inspect-context.mjs",
     "build": "node scripts/build-worker.mjs",
     "postinstall": "node scripts/build-worker.mjs",
     "test": "npm run test:node && npm run build && npm run test:integration",
