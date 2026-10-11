@@ -9,11 +9,12 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 const (
 	protocolVersion        = 1
-	policyVersion          = "inspect-context-mini-v1"
+	policyVersion          = "inspect-context-mini-v2"
 	maxQueryBytes          = 4_096
 	maxPacketBytes         = 49_152
 	maxDiscoveredFiles     = 2_000
@@ -173,6 +174,11 @@ func validateQuery(query string) error {
 	}
 	if strings.IndexByte(query, 0) >= 0 {
 		return errors.New("query must not contain NUL")
+	}
+	if !strings.ContainsFunc(query, func(value rune) bool {
+		return value == '_' || unicode.IsLetter(value) || unicode.IsNumber(value)
+	}) {
+		return errors.New("query must contain at least one letter, number, or underscore")
 	}
 	if len([]byte(query)) > maxQueryBytes {
 		return fmt.Errorf("query exceeds %d UTF-8 bytes", maxQueryBytes)

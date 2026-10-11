@@ -9,6 +9,7 @@ import test from "node:test";
 import {
 	InspectContextError,
 	MAX_PACKET_BYTES,
+	POLICY_VERSION,
 	type ResearchPacketV1,
 } from "../src/packet.ts";
 import {
@@ -43,7 +44,7 @@ function packet(query = "needle"): ResearchPacketV1 {
 		receipt: {
 			packetId: "packet",
 			schemaVersion: 1,
-			policyVersion: "inspect-context-mini-v1",
+			policyVersion: POLICY_VERSION,
 			snapshotId: "snapshot",
 			durationMs: 1,
 			discoveredFiles: 1,

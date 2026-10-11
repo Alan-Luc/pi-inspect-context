@@ -1,6 +1,6 @@
 import { Type, type Static } from "typebox";
 
-export const POLICY_VERSION = "inspect-context-mini-v1" as const;
+export const POLICY_VERSION = "inspect-context-mini-v2" as const;
 export const WORKER_PROTOCOL_VERSION = 1 as const;
 export const MAX_QUERY_BYTES = 4_096;
 export const MAX_DISCOVERED_FILES = 2_000;
@@ -13,6 +13,8 @@ export const MAX_EVIDENCE_PER_CATEGORY = 32;
 export const MAX_UNKNOWNS = 32;
 export const MAX_OMISSION_GROUPS = 32;
 export const MAX_OMISSION_EXAMPLES = 4;
+
+const SEARCHABLE_QUERY_CHARACTER = /[\p{L}\p{N}_]/u;
 
 export const OMISSION_REASONS = [
 	"aggregate_byte_limit",
@@ -87,7 +89,11 @@ const ReceiptSchema = Type.Object(
 
 export const INSPECT_CONTEXT_PARAMETERS = Type.Object(
 	{
-		query: Type.String({ minLength: 1, maxLength: MAX_QUERY_BYTES }),
+		query: Type.String({
+			minLength: 1,
+			maxLength: MAX_QUERY_BYTES,
+			description: "One short symbol, route, config key, path fragment, or concept. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch.",
+		}),
 	},
 	{ additionalProperties: false },
 );
@@ -181,6 +187,9 @@ export function normalizeQuery(params: unknown): string {
 	}
 	if (normalized.includes("\0")) {
 		throw new InspectContextError("invalid_query", "query must not contain NUL");
+	}
+	if (!SEARCHABLE_QUERY_CHARACTER.test(normalized)) {
+		throw new InspectContextError("invalid_query", "query must contain at least one letter, number, or underscore");
 	}
 	const bytes = Buffer.byteLength(normalized, "utf8");
 	if (bytes > MAX_QUERY_BYTES) {

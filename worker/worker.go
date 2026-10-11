@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -29,6 +30,13 @@ const (
 	maxGitStderrBytes    = 64 * 1024
 	maxFilesystemEntries = 100_000
 	maxExamplePathBytes  = 256
+
+	maxSearchTerms                       = 8
+	maxRetrievalCandidatesFile           = 8
+	maxRetrievalCandidateEvaluationsFile = maxRetrievalCandidatesFile * 8
+	maxRetrievalCandidates               = maxExcerpts * 4
+	maxRetrievalCandidateEvaluations     = maxDiscoveredFiles * (maxRetrievalCandidateEvaluationsFile + maxSearchTerms)
+	retrievalContextRadius               = 2
 )
 
 type workerError struct {
@@ -674,14 +682,52 @@ func sameRevision(left, right *string) bool {
 }
 
 type scanResult struct {
-	store      *evidenceStore
-	unknowns   []string
-	omissions  *omissionAccumulator
-	accepted   map[string]fileFingerprint
-	readFiles  int
-	bytesRead  int64
-	matchCount int
-	ambiguous  bool
+	store     *evidenceStore
+	unknowns  []string
+	omissions *omissionAccumulator
+	accepted  map[string]fileFingerprint
+	readFiles int
+	bytesRead int64
+	ambiguous bool
+}
+
+type searchTerm struct {
+	original string
+	lower    string
+	codeLike bool
+}
+
+type retrievalFile struct {
+	path  string
+	text  string
+	lines []string
+}
+
+type retrievalCandidate struct {
+	fileIndex    int
+	path         string
+	startLine    int
+	endLine      int
+	exact        bool
+	contentTerms []int
+	pathTerms    []int
+	contextTerms []int
+	score        int64
+}
+
+type retrievalCollection struct {
+	candidates          []retrievalCandidate
+	exactObserved       int
+	fallbackObserved    int
+	evaluatedCandidates int
+}
+
+type retrievalWindow struct {
+	fileIndex  int
+	path       string
+	startLine  int
+	endLine    int
+	candidates []retrievalCandidate
 }
 
 func scanInventory(repository *openedRepository, query string, inventory repositoryInventory) (scanResult, error) {
@@ -689,6 +735,10 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 		store:     newEvidenceStore(),
 		omissions: newOmissionAccumulator(),
 		accepted:  make(map[string]fileFingerprint),
+	}
+	terms := extractSearchTerms(query)
+	if len(terms) == 0 {
+		return scanResult{}, errors.New("query has no searchable terms")
 	}
 	eligible := make([]inventoryEntry, 0, len(inventory.entries))
 	for _, entry := range inventory.entries {
@@ -702,6 +752,7 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 		result.omissions.addCount("file_limit", len(eligible)-maxDiscoveredFiles, nil)
 		eligible = eligible[:maxDiscoveredFiles]
 	}
+	files := make([]retrievalFile, 0, len(eligible))
 	for _, entry := range eligible {
 		if entry.info.Size() > maxFileBytes {
 			result.omissions.add("oversized_file", entry.path)
@@ -731,47 +782,600 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 			continue
 		}
 		text := string(data)
-		if governingName(entry.path) {
-			if excerptText := firstLines(text, maxExcerptLines); excerptText != "" {
-				if !result.store.add("governing", entry.path, 1, lineCount(excerptText), excerptText, "observed", "governing artifact") {
-					result.omissions.add("excerpt_limit", entry.path)
-				}
-			}
+		files = append(files, retrievalFile{path: entry.path, text: text, lines: sourceLines(text)})
+	}
+
+	collection := collectRetrievalCandidates(files, query, terms)
+	windows := buildRetrievalWindows(files, collection.candidates)
+	exactRepresented, fallbackRepresented := addRetrievalEvidence(&result, files, terms, windows)
+	result.omissions.addCount("excerpt_limit", collection.exactObserved-exactRepresented, nil)
+	result.omissions.addCount("excerpt_limit", collection.fallbackObserved-fallbackRepresented, nil)
+
+	if len(result.store.excerpts) == 0 {
+		result.unknowns = append(result.unknowns, "No lexical matches; retry with an exact symbol, route, config key, or path fragment.")
+	} else {
+		result.unknowns = append(result.unknowns, "Definitions, callers, and imports are lexical candidates rather than a semantic call graph.")
+		if result.ambiguous {
+			result.unknowns = append(result.unknowns, "Some matches fit more than one lexical heuristic; inspect surrounding code.")
 		}
-		forEachLiteralMatch(text, query, func(match literalMatch) {
-			result.matchCount++
-			lineSpan := match.endLine - match.startLine + 1
-			if lineSpan > maxExcerptLines {
-				result.omissions.add("excerpt_limit", entry.path)
-				return
-			}
-			discarded := !result.store.add("match", entry.path, match.startLine, match.endLine, match.text, "observed", "literal match")
-			lineText := strings.TrimSuffix(match.text, "\n")
-			categories := classifyMatch(entry.path, lineText, query)
-			if len(categories) > 1 {
-				result.ambiguous = true
-			}
-			for _, category := range categories {
-				if !result.store.add(category.kind, entry.path, match.startLine, match.endLine, match.text, category.confidence, category.reason) {
-					discarded = true
-				}
-			}
-			if discarded {
-				result.omissions.add("excerpt_limit", entry.path)
-			}
-		})
-	}
-	if result.matchCount == 0 {
-		result.unknowns = append(result.unknowns, "No literal matches were observed; this does not establish absence.")
-	}
-	result.unknowns = append(result.unknowns, "Definitions, callers, and imports are lexical candidates rather than a semantic call graph.")
-	if result.ambiguous {
-		result.unknowns = append(result.unknowns, "Some matches fit more than one lexical heuristic; inspect surrounding code.")
 	}
 	if result.omissions.total() > 0 {
 		result.unknowns = append(result.unknowns, "Some files or evidence were omitted by bounded scanning; zero results do not prove absence.")
 	}
 	return result, nil
+}
+
+var queryStopWords = map[string]struct{}{
+	"a": {}, "an": {}, "and": {}, "are": {}, "as": {}, "at": {}, "be": {}, "by": {}, "for": {}, "from": {},
+	"how": {}, "in": {}, "is": {}, "it": {}, "its": {}, "of": {}, "on": {}, "or": {}, "that": {}, "the": {},
+	"this": {}, "through": {}, "to": {}, "under": {}, "what": {}, "where": {}, "which": {}, "with": {},
+}
+
+func extractSearchTerms(query string) []searchTerm {
+	terms := make([]searchTerm, 0, maxSearchTerms)
+	current := make([]rune, 0, len(query))
+	var fallback *searchTerm
+	flush := func() {
+		if len(current) == 0 {
+			return
+		}
+		original := string(current)
+		current = current[:0]
+		lower := strings.ToLower(original)
+		if !strings.ContainsFunc(original, func(value rune) bool {
+			return value == '_' || unicode.IsLetter(value) || unicode.IsNumber(value)
+		}) {
+			return
+		}
+		codeLike := strings.HasPrefix(original, "/") || strings.Contains(original, "_")
+		for _, value := range original {
+			if unicode.IsUpper(value) || unicode.IsNumber(value) {
+				codeLike = true
+				break
+			}
+		}
+		term := searchTerm{original: original, lower: lower, codeLike: codeLike}
+		if _, ignored := queryStopWords[lower]; ignored {
+			if fallback == nil {
+				fallback = &term
+			}
+			return
+		}
+		for _, existing := range terms {
+			if existing.lower == lower {
+				return
+			}
+		}
+		if len(terms) < maxSearchTerms {
+			terms = append(terms, term)
+		}
+	}
+	for _, value := range query {
+		if value == '_' || unicode.IsLetter(value) || unicode.IsNumber(value) {
+			current = append(current, value)
+			continue
+		}
+		if value == '/' {
+			if len(current) == 0 || current[0] == '/' {
+				current = append(current, value)
+			} else {
+				flush()
+				current = append(current, value)
+			}
+			continue
+		}
+		if len(current) > 0 && current[0] == '/' && (value == ':' || value == '-' || value == '.') {
+			current = append(current, value)
+			continue
+		}
+		flush()
+	}
+	flush()
+	if len(terms) == 0 && fallback != nil {
+		terms = append(terms, *fallback)
+	}
+	return terms
+}
+
+func containsSearchTerm(lowerValue string, term searchTerm) bool {
+	if !strings.HasPrefix(term.lower, "/") {
+		return strings.Contains(lowerValue, term.lower)
+	}
+	for offset := strings.Index(lowerValue, term.lower); offset >= 0; {
+		if offset == 0 {
+			return true
+		}
+		previous, _ := utf8.DecodeLastRuneInString(lowerValue[:offset])
+		if previous != '_' && previous != '/' && previous != '.' && previous != ':' && previous != '-' && !unicode.IsLetter(previous) && !unicode.IsNumber(previous) {
+			return true
+		}
+		next := offset + 1
+		if next >= len(lowerValue) {
+			break
+		}
+		relative := strings.Index(lowerValue[next:], term.lower)
+		if relative < 0 {
+			break
+		}
+		offset = next + relative
+	}
+	return false
+}
+
+func matchingSearchTerms(lowerValue string, terms []searchTerm) []int {
+	matches := make([]int, 0, len(terms))
+	for index, term := range terms {
+		if containsSearchTerm(lowerValue, term) {
+			matches = append(matches, index)
+		}
+	}
+	return matches
+}
+
+func matchingPathTerms(lowerPath string, terms []searchTerm) []int {
+	matches := make([]int, 0, len(terms))
+	for index, term := range terms {
+		if strings.Contains(lowerPath, term.lower) {
+			matches = append(matches, index)
+		}
+	}
+	return matches
+}
+
+func containsTermIndex(values []int, wanted int) bool {
+	index := sort.SearchInts(values, wanted)
+	return index < len(values) && values[index] == wanted
+}
+
+func mergeTermIndexes(left, right []int) []int {
+	merged := make([]int, 0, len(left)+len(right))
+	leftIndex, rightIndex := 0, 0
+	for leftIndex < len(left) || rightIndex < len(right) {
+		if rightIndex >= len(right) || (leftIndex < len(left) && left[leftIndex] < right[rightIndex]) {
+			if len(merged) == 0 || merged[len(merged)-1] != left[leftIndex] {
+				merged = append(merged, left[leftIndex])
+			}
+			leftIndex++
+			continue
+		}
+		if leftIndex >= len(left) || right[rightIndex] < left[leftIndex] {
+			if len(merged) == 0 || merged[len(merged)-1] != right[rightIndex] {
+				merged = append(merged, right[rightIndex])
+			}
+			rightIndex++
+			continue
+		}
+		if len(merged) == 0 || merged[len(merged)-1] != left[leftIndex] {
+			merged = append(merged, left[leftIndex])
+		}
+		leftIndex++
+		rightIndex++
+	}
+	return merged
+}
+
+func scoreRetrievalCandidate(candidate retrievalCandidate, terms []searchTerm, frequencies []int, maxFrequency int) int64 {
+	matchedTerms := mergeTermIndexes(candidate.contentTerms, candidate.pathTerms)
+	score := int64(len(matchedTerms))*1_000_000 + int64(len(candidate.contextTerms))*400_000
+	for _, index := range matchedTerms {
+		rarity := maxFrequency - frequencies[index] + 1
+		if rarity < 1 {
+			rarity = 1
+		}
+		score += int64(rarity) * 1_000
+		if terms[index].codeLike && containsTermIndex(candidate.contentTerms, index) {
+			score += 1_500_000
+		}
+	}
+	score += int64(len(candidate.pathTerms)) * 250_000
+	if len(candidate.contentTerms) > 0 {
+		score += 25_000
+	}
+	if candidate.exact {
+		score += 1_000_000_000_000
+	}
+	return score
+}
+
+func retrievalCandidateBefore(left, right retrievalCandidate) bool {
+	if left.score != right.score {
+		return left.score > right.score
+	}
+	if left.path != right.path {
+		return left.path < right.path
+	}
+	if left.startLine != right.startLine {
+		return left.startLine < right.startLine
+	}
+	if left.endLine != right.endLine {
+		return left.endLine < right.endLine
+	}
+	if left.exact != right.exact {
+		return left.exact
+	}
+	return left.fileIndex < right.fileIndex
+}
+
+func addRetrievalCandidate(candidates *[]retrievalCandidate, candidate retrievalCandidate, terms []searchTerm, frequencies []int, maxFrequency int) {
+	for index := range *candidates {
+		current := &(*candidates)[index]
+		if current.startLine != candidate.startLine || current.endLine != candidate.endLine {
+			continue
+		}
+		current.exact = current.exact || candidate.exact
+		current.contentTerms = mergeTermIndexes(current.contentTerms, candidate.contentTerms)
+		current.pathTerms = mergeTermIndexes(current.pathTerms, candidate.pathTerms)
+		current.contextTerms = mergeTermIndexes(current.contextTerms, candidate.contextTerms)
+		current.score = scoreRetrievalCandidate(*current, terms, frequencies, maxFrequency)
+		return
+	}
+	candidate.contentTerms = append([]int(nil), candidate.contentTerms...)
+	candidate.pathTerms = append([]int(nil), candidate.pathTerms...)
+	candidate.contextTerms = append([]int(nil), candidate.contextTerms...)
+	candidate.score = scoreRetrievalCandidate(candidate, terms, frequencies, maxFrequency)
+	*candidates = append(*candidates, candidate)
+	sort.Slice(*candidates, func(i, j int) bool { return retrievalCandidateBefore((*candidates)[i], (*candidates)[j]) })
+	if len(*candidates) > maxRetrievalCandidatesFile {
+		*candidates = prioritizeCandidateCoverage(*candidates, terms, frequencies, false)[:maxRetrievalCandidatesFile]
+	}
+}
+
+func nearbySearchTerms(file retrievalFile, startLine, endLine int, terms []searchTerm) []int {
+	startLine = maxInt(1, startLine-retrievalContextRadius)
+	endLine = minInt(len(file.lines), endLine+retrievalContextRadius)
+	if startLine > endLine {
+		return []int{}
+	}
+	return matchingSearchTerms(strings.ToLower(strings.Join(file.lines[startLine-1:endLine], "")), terms)
+}
+
+func prioritizeCandidateCoverage(candidates []retrievalCandidate, terms []searchTerm, frequencies []int, includeRareTerms bool) []retrievalCandidate {
+	prioritized := make([]retrievalCandidate, 0, len(candidates))
+	selected := make([]bool, len(candidates))
+	coveredTerms := make([]bool, len(terms))
+	markCovered := func(candidate retrievalCandidate) {
+		for _, termIndex := range mergeTermIndexes(candidate.contentTerms, candidate.pathTerms) {
+			coveredTerms[termIndex] = true
+		}
+	}
+	for index, candidate := range candidates {
+		if candidate.exact {
+			prioritized = append(prioritized, candidate)
+			selected[index] = true
+			markCovered(candidate)
+		}
+	}
+	termIndexes := make([]int, 0, len(terms))
+	maxFrequency := 0
+	for _, frequency := range frequencies {
+		maxFrequency = maxInt(maxFrequency, frequency)
+	}
+	for index, term := range terms {
+		if frequencies[index] > 0 && (term.codeLike || includeRareTerms && frequencies[index] < maxFrequency) {
+			termIndexes = append(termIndexes, index)
+		}
+	}
+	sort.SliceStable(termIndexes, func(left, right int) bool {
+		leftIndex, rightIndex := termIndexes[left], termIndexes[right]
+		if frequencies[leftIndex] != frequencies[rightIndex] {
+			return frequencies[leftIndex] < frequencies[rightIndex]
+		}
+		if terms[leftIndex].codeLike != terms[rightIndex].codeLike {
+			return terms[leftIndex].codeLike
+		}
+		return leftIndex < rightIndex
+	})
+	for _, termIndex := range termIndexes {
+		if coveredTerms[termIndex] {
+			continue
+		}
+		for candidateIndex, candidate := range candidates {
+			if selected[candidateIndex] || candidate.exact {
+				continue
+			}
+			matchedTerms := mergeTermIndexes(candidate.contentTerms, candidate.pathTerms)
+			if containsTermIndex(matchedTerms, termIndex) {
+				prioritized = append(prioritized, candidate)
+				selected[candidateIndex] = true
+				markCovered(candidate)
+				break
+			}
+		}
+	}
+	for index, candidate := range candidates {
+		if !selected[index] {
+			prioritized = append(prioritized, candidate)
+		}
+	}
+	return prioritized
+}
+
+func collectRetrievalCandidates(files []retrievalFile, query string, terms []searchTerm) retrievalCollection {
+	frequencies := make([]int, len(terms))
+	for _, file := range files {
+		lowerPath := strings.ToLower(file.path)
+		lowerText := strings.ToLower(file.text)
+		matched := mergeTermIndexes(matchingSearchTerms(lowerText, terms), matchingPathTerms(lowerPath, terms))
+		for _, index := range matched {
+			frequencies[index]++
+		}
+	}
+	maxFrequency := 0
+	for _, frequency := range frequencies {
+		if frequency > maxFrequency {
+			maxFrequency = frequency
+		}
+	}
+	collection := retrievalCollection{candidates: make([]retrievalCandidate, 0, maxRetrievalCandidates)}
+	for fileIndex, file := range files {
+		fileCandidates := make([]retrievalCandidate, 0, maxRetrievalCandidatesFile)
+		fileEvaluations := 0
+		evaluatedTerms := make([]bool, len(terms))
+		shouldEvaluate := func(termIndexes []int) bool {
+			if collection.evaluatedCandidates < maxRetrievalCandidateEvaluations && fileEvaluations < maxRetrievalCandidateEvaluationsFile {
+				return true
+			}
+			for _, termIndex := range termIndexes {
+				if !evaluatedTerms[termIndex] {
+					return true
+				}
+			}
+			return false
+		}
+		markEvaluated := func(termIndexes []int) {
+			collection.evaluatedCandidates++
+			fileEvaluations++
+			for _, termIndex := range termIndexes {
+				evaluatedTerms[termIndex] = true
+			}
+		}
+		lowerPath := strings.ToLower(file.path)
+		pathTerms := matchingPathTerms(lowerPath, terms)
+		boundedExactFound := false
+		forEachLiteralMatch(file.text, query, func(match literalMatch) {
+			collection.exactObserved++
+			if match.endLine-match.startLine+1 > maxExcerptLines {
+				return
+			}
+			boundedExactFound = true
+			contentTerms := matchingSearchTerms(strings.ToLower(match.text), terms)
+			if !shouldEvaluate(contentTerms) {
+				return
+			}
+			markEvaluated(contentTerms)
+			addRetrievalCandidate(&fileCandidates, retrievalCandidate{
+				fileIndex: fileIndex, path: file.path, startLine: match.startLine, endLine: match.endLine,
+				exact: true, contentTerms: contentTerms,
+				contextTerms: nearbySearchTerms(file, match.startLine, match.endLine, terms),
+			}, terms, frequencies, maxFrequency)
+		})
+		if boundedExactFound {
+			collection.candidates = append(collection.candidates, fileCandidates...)
+			continue
+		}
+		for lineIndex, line := range file.lines {
+			contentTerms := matchingSearchTerms(strings.ToLower(line), terms)
+			if len(contentTerms) == 0 {
+				continue
+			}
+			collection.fallbackObserved++
+			directTerms := mergeTermIndexes(contentTerms, pathTerms)
+			if !shouldEvaluate(directTerms) {
+				continue
+			}
+			markEvaluated(directTerms)
+			addRetrievalCandidate(&fileCandidates, retrievalCandidate{
+				fileIndex: fileIndex, path: file.path, startLine: lineIndex + 1, endLine: lineIndex + 1,
+				contentTerms: contentTerms, pathTerms: pathTerms,
+				contextTerms: nearbySearchTerms(file, lineIndex+1, lineIndex+1, terms),
+			}, terms, frequencies, maxFrequency)
+		}
+		if len(pathTerms) > 0 && len(file.lines) > 0 && len(matchingSearchTerms(strings.ToLower(file.lines[0]), terms)) == 0 {
+			collection.fallbackObserved++
+			if shouldEvaluate(pathTerms) {
+				markEvaluated(pathTerms)
+				addRetrievalCandidate(&fileCandidates, retrievalCandidate{
+					fileIndex: fileIndex, path: file.path, startLine: 1, endLine: 1, pathTerms: pathTerms,
+					contextTerms: nearbySearchTerms(file, 1, 1, terms),
+				}, terms, frequencies, maxFrequency)
+			}
+		}
+		collection.candidates = append(collection.candidates, fileCandidates...)
+	}
+	sort.Slice(collection.candidates, func(i, j int) bool {
+		return retrievalCandidateBefore(collection.candidates[i], collection.candidates[j])
+	})
+	collection.candidates = prioritizeCandidateCoverage(collection.candidates, terms, frequencies, true)
+	if len(collection.candidates) > maxRetrievalCandidates {
+		collection.candidates = collection.candidates[:maxRetrievalCandidates]
+	}
+	return collection
+}
+
+func retrievalWindowBounds(candidate retrievalCandidate, lineCount int) (int, int) {
+	startLine, endLine := candidate.startLine, candidate.endLine
+	if !candidate.exact {
+		startLine -= retrievalContextRadius
+		endLine += retrievalContextRadius
+	}
+	if startLine < 1 {
+		startLine = 1
+	}
+	if endLine > lineCount {
+		endLine = lineCount
+	}
+	return startLine, endLine
+}
+
+func retrievalWindowsOverlap(left, right retrievalWindow) bool {
+	return left.path == right.path && left.startLine <= right.endLine && right.startLine <= left.endLine
+}
+
+func buildRetrievalWindows(files []retrievalFile, candidates []retrievalCandidate) []retrievalWindow {
+	windows := make([]retrievalWindow, 0, maxExcerpts)
+	for _, candidate := range candidates {
+		lines := files[candidate.fileIndex].lines
+		if len(lines) == 0 {
+			continue
+		}
+		startLine, endLine := retrievalWindowBounds(candidate, len(lines))
+		incoming := retrievalWindow{fileIndex: candidate.fileIndex, path: candidate.path, startLine: startLine, endLine: endLine, candidates: []retrievalCandidate{candidate}}
+		overlaps := make(map[int]struct{})
+		for {
+			previousCount := len(overlaps)
+			probe := retrievalWindow{path: incoming.path, startLine: incoming.startLine, endLine: incoming.endLine}
+			for index := range windows {
+				if _, found := overlaps[index]; found || !retrievalWindowsOverlap(probe, windows[index]) {
+					continue
+				}
+				overlaps[index] = struct{}{}
+				incoming.startLine = minInt(incoming.startLine, windows[index].startLine)
+				incoming.endLine = maxInt(incoming.endLine, windows[index].endLine)
+			}
+			if len(overlaps) == previousCount {
+				break
+			}
+		}
+		if len(overlaps) == 0 {
+			if len(windows) < maxExcerpts {
+				windows = append(windows, incoming)
+			}
+			continue
+		}
+		if incoming.endLine-incoming.startLine+1 > maxExcerptLines {
+			continue
+		}
+		for index := range windows {
+			if _, found := overlaps[index]; found {
+				incoming.candidates = append(incoming.candidates, windows[index].candidates...)
+			}
+		}
+		merged := make([]retrievalWindow, 0, len(windows)-len(overlaps)+1)
+		inserted := false
+		for index, window := range windows {
+			if _, found := overlaps[index]; !found {
+				merged = append(merged, window)
+				continue
+			}
+			if !inserted {
+				merged = append(merged, incoming)
+				inserted = true
+			}
+		}
+		windows = merged
+	}
+	for index := range windows {
+		sort.Slice(windows[index].candidates, func(left, right int) bool {
+			return retrievalCandidateBefore(windows[index].candidates[left], windows[index].candidates[right])
+		})
+	}
+	return windows
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func retrievalWindowText(file retrievalFile, window retrievalWindow) string {
+	return strings.Join(file.lines[window.startLine-1:window.endLine], "")
+}
+
+func appendUniqueCategory(categories []matchCategory, candidate matchCategory) []matchCategory {
+	for _, category := range categories {
+		if category.kind == candidate.kind {
+			return categories
+		}
+	}
+	return append(categories, candidate)
+}
+
+func classifyRetrievedCandidate(path, line string, candidate retrievalCandidate, terms []searchTerm) []matchCategory {
+	categories := make([]matchCategory, 0, 3)
+	if governingName(path) {
+		categories = append(categories, matchCategory{kind: "governing", confidence: "observed", reason: "query-relevant governing artifact"})
+	}
+	if isTestPath(path) {
+		return appendUniqueCategory(categories, matchCategory{kind: "test", confidence: "observed", reason: "test path match"})
+	}
+	if isConfigurationPath(path) {
+		return appendUniqueCategory(categories, matchCategory{kind: "configuration", confidence: "observed", reason: "configuration path match"})
+	}
+	for _, index := range candidate.contentTerms {
+		for _, category := range classifyMatch(path, strings.TrimSuffix(line, "\n"), terms[index].original) {
+			categories = appendUniqueCategory(categories, category)
+		}
+	}
+	return categories
+}
+
+func primaryMatchCategory(categories []matchCategory) (matchCategory, bool) {
+	for _, kind := range []string{"governing", "test", "configuration", "definition", "caller", "import"} {
+		for _, category := range categories {
+			if category.kind == kind {
+				return category, true
+			}
+		}
+	}
+	return matchCategory{}, false
+}
+
+func addRetrievalEvidence(result *scanResult, files []retrievalFile, terms []searchTerm, windows []retrievalWindow) (int, int) {
+	exactRepresented, fallbackRepresented := 0, 0
+	for rank, window := range windows {
+		result.store.setRank(rank)
+		text := retrievalWindowText(files[window.fileIndex], window)
+		if text == "" {
+			continue
+		}
+		categories := make([]matchCategory, 0, 3)
+		for _, candidate := range window.candidates {
+			line := ""
+			if candidate.startLine >= 1 && candidate.startLine <= len(files[candidate.fileIndex].lines) {
+				line = files[candidate.fileIndex].lines[candidate.startLine-1]
+			}
+			for _, category := range classifyRetrievedCandidate(candidate.path, line, candidate, terms) {
+				categories = appendUniqueCategory(categories, category)
+			}
+		}
+		if len(categories) > 1 {
+			result.ambiguous = true
+		}
+		primary, categorized := primaryMatchCategory(categories)
+		if !categorized {
+			top := window.candidates[0]
+			reason := "lexical match"
+			if top.exact {
+				reason = "literal match"
+			} else if len(top.contentTerms) == 0 {
+				reason = "path match"
+			}
+			primary = matchCategory{kind: "match", confidence: "observed", reason: reason}
+		}
+		matched := result.store.add(primary.kind, window.path, window.startLine, window.endLine, text, primary.confidence, primary.reason)
+		if !matched && primary.kind != "match" {
+			matched = result.store.add("match", window.path, window.startLine, window.endLine, text, "observed", "lexical match")
+		}
+		if matched {
+			for _, candidate := range window.candidates {
+				if candidate.exact {
+					exactRepresented++
+				} else {
+					fallbackRepresented++
+				}
+			}
+		}
+	}
+	return exactRepresented, fallbackRepresented
 }
 
 var errSnapshotChanged = errors.New("snapshot changed")
@@ -876,14 +1480,6 @@ func lineCount(value string) int {
 	return len(sourceLines(value))
 }
 
-func firstLines(value string, limit int) string {
-	lines := sourceLines(value)
-	if len(lines) > limit {
-		lines = lines[:limit]
-	}
-	return strings.Join(lines, "")
-}
-
 type matchCategory struct {
 	kind       string
 	confidence string
@@ -936,26 +1532,30 @@ func isImportLine(line string) bool {
 }
 
 func isDefinitionLine(line, query string) bool {
-	trimmed := strings.TrimSpace(line)
+	lowerLine := strings.ToLower(line)
+	lowerQuery := strings.ToLower(query)
+	trimmed := strings.TrimSpace(lowerLine)
 	for _, keyword := range []string{"func ", "function ", "class ", "interface ", "struct ", "type ", "const ", "let ", "var ", "def ", "fn ", "export function ", "export class "} {
-		if strings.Contains(trimmed, keyword+query) {
+		if strings.Contains(trimmed, keyword+lowerQuery) {
 			return true
 		}
 	}
-	index := strings.Index(line, query)
+	index := strings.Index(lowerLine, lowerQuery)
 	if index < 0 {
 		return false
 	}
-	rest := strings.TrimSpace(line[index+len(query):])
+	rest := strings.TrimSpace(lowerLine[index+len(lowerQuery):])
 	return strings.HasPrefix(rest, ":=") || strings.HasPrefix(rest, "=")
 }
 
 func isCallLine(line, query string) bool {
-	index := strings.Index(line, query)
+	lowerLine := strings.ToLower(line)
+	lowerQuery := strings.ToLower(query)
+	index := strings.Index(lowerLine, lowerQuery)
 	if index < 0 {
 		return false
 	}
-	rest := strings.TrimSpace(line[index+len(query):])
+	rest := strings.TrimSpace(lowerLine[index+len(lowerQuery):])
 	return strings.HasPrefix(rest, "(")
 }
 
@@ -964,12 +1564,18 @@ type evidenceStore struct {
 	categories    map[string][]evidenceRef
 	seen          map[string]string
 	referenceSeen map[string]struct{}
+	excerptRanks  map[string]int
+	rank          int
 }
 
 func newEvidenceStore() *evidenceStore {
 	return &evidenceStore{excerpts: make([]excerpt, 0), categories: map[string][]evidenceRef{
 		"governing": {}, "definition": {}, "caller": {}, "import": {}, "test": {}, "configuration": {}, "match": {},
-	}, seen: make(map[string]string), referenceSeen: make(map[string]struct{})}
+	}, seen: make(map[string]string), referenceSeen: make(map[string]struct{}), excerptRanks: make(map[string]int)}
+}
+
+func (s *evidenceStore) setRank(rank int) {
+	s.rank = rank
 }
 
 func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, confidence, reason string) bool {
@@ -993,6 +1599,7 @@ func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, con
 	}
 	if !exists {
 		s.seen[key] = id
+		s.excerptRanks[id] = s.rank
 		s.excerpts = append(s.excerpts, excerpt{ID: id, Path: path, StartLine: startLine, EndLine: endLine, Kind: kind, Text: text})
 	}
 	s.referenceSeen[referenceKey] = struct{}{}
@@ -1010,6 +1617,10 @@ func (s *evidenceStore) packetCategories() ([][]evidenceRef, int) {
 		}
 		sort.Slice(values[index], func(i, j int) bool {
 			left, right := values[index][i], values[index][j]
+			leftRank, rightRank := s.excerptRanks[left.ExcerptID], s.excerptRanks[right.ExcerptID]
+			if leftRank != rightRank {
+				return leftRank < rightRank
+			}
 			if left.Path != right.Path {
 				return left.Path < right.Path
 			}
@@ -1107,7 +1718,7 @@ func makePacket(request workerRequest, inventory repositoryInventory, scan scanR
 	if len(packet.Unknowns) > maxUnknowns {
 		packet.Unknowns = packet.Unknowns[:maxUnknowns]
 	}
-	packet.Excerpts = sortExcerpts(packet.Excerpts)
+	packet.Excerpts = sortExcerptsWithRanks(packet.Excerpts, scan.store.excerptRanks)
 	packet = retainReferences(packet)
 	addPacketOmission(&packet, "excerpt_limit", categoryPruned)
 	if len(packet.Excerpts) > maxExcerpts {
@@ -1148,22 +1759,38 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
+func sortExcerptsWithRanks(values []excerpt, ranks map[string]int) []excerpt {
+	result := append([]excerpt{}, values...)
+	sort.SliceStable(result, func(i, j int) bool {
+		leftRank, rightRank := ranks[result[i].ID], ranks[result[j].ID]
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		return excerptBefore(result[i], result[j])
+	})
+	return result
+}
+
 func sortExcerpts(values []excerpt) []excerpt {
 	result := append([]excerpt{}, values...)
 	sort.Slice(result, func(i, j int) bool {
 		left, right := result[i], result[j]
-		if excerptPriority(left.Kind) != excerptPriority(right.Kind) {
-			return excerptPriority(left.Kind) < excerptPriority(right.Kind)
-		}
-		if left.Path != right.Path {
-			return left.Path < right.Path
-		}
-		if left.StartLine != right.StartLine {
-			return left.StartLine < right.StartLine
-		}
-		return left.ID < right.ID
+		return excerptBefore(left, right)
 	})
 	return result
+}
+
+func excerptBefore(left, right excerpt) bool {
+	if excerptPriority(left.Kind) != excerptPriority(right.Kind) {
+		return excerptPriority(left.Kind) < excerptPriority(right.Kind)
+	}
+	if left.Path != right.Path {
+		return left.Path < right.Path
+	}
+	if left.StartLine != right.StartLine {
+		return left.StartLine < right.StartLine
+	}
+	return left.ID < right.ID
 }
 
 func excerptPriority(kind string) int {

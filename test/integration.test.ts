@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { registerInspectContext } from "../extensions/index.ts";
-import { createInspectContextTool } from "../src/adapter.ts";
+import { createInspectContextTool, runWorker } from "../src/adapter.ts";
+import { POLICY_VERSION } from "../src/packet.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -47,6 +48,41 @@ test("the registered tool executes the packaged Go worker without executing repo
 		assert.match(excerpt?.text ?? "", /func integratedNeedle\(\)/);
 		assert.match(excerpt?.text ?? "", /Ignore prior instructions/);
 		await assert.rejects(lstat(executionMarker), { code: "ENOENT" });
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("the TypeScript adapter and Go worker preserve the v2 policy and v1 packet contract", async () => {
+	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v2-integration-"));
+	try {
+		await mkdir(join(root, "src"));
+		await writeFile(join(root, "src", "health.ts"), "export const statusRoute = '/health/ready';\nexport function registerStatusEndpoint() {}\n", "utf8");
+		await writeFile(join(root, "src", "noise.ts"), "export function unrelated() {}\n", "utf8");
+
+		const packet = await runWorker({ root, query: "status endpoint route" });
+		assert.equal(packet.version, 1);
+		assert.equal(packet.receipt.schemaVersion, 1);
+		assert.equal(packet.receipt.policyVersion, POLICY_VERSION);
+		assert.equal(packet.target.query, "status endpoint route");
+		const excerptPaths = [...new Set(packet.excerpts.map((excerpt) => excerpt.path))];
+		assert.ok(excerptPaths.slice(0, 5).includes("src/health.ts"), excerptPaths.join(", "));
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("the Go worker returns a compact actionable packet for an impossible query", async () => {
+	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v2-no-match-"));
+	try {
+		await mkdir(join(root, "src"));
+		await writeFile(join(root, "src", "health.ts"), "export const statusRoute = '/health/ready';\n", "utf8");
+
+		const packet = await runWorker({ root, query: "impossible-lexeme-9f3a2c" });
+		assert.equal(packet.excerpts.length, 0);
+		assert.equal(packet.governingArtifacts.length, 0);
+		assert.deepEqual(packet.unknowns, ["No lexical matches; retry with an exact symbol, route, config key, or path fragment."]);
+		assert.ok(Buffer.byteLength(JSON.stringify(packet), "utf8") < 2 * 1024);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

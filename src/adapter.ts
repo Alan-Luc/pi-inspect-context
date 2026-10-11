@@ -575,7 +575,7 @@ export function createInspectContextTool(options: InspectContextToolOptions = {}
 	return {
 		name: "inspect_context",
 		label: "Inspect context",
-		description: "Find bounded repository context for one literal query. Results are read-only, lexical discovery aids: zero results are not proof of absence, and weak or materially omitted evidence requires another literal query or ordinary repository investigation.",
+		description: "Find bounded lexical repository context for one short symbol, route, config key, path fragment, or concept query. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Results are read-only discovery aids: zero, weak, or materially omitted evidence is not proof of absence; use ordinary repository investigation when needed.",
 		parameters: INSPECT_CONTEXT_PARAMETERS,
 		outputSchema: RESEARCH_PACKET_V1_SCHEMA,
 		executionMode: "sequential" as const,

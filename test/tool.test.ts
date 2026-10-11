@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { Value } from "typebox/value";
 import { registerInspectContext } from "../extensions/index.ts";
-import { INSPECT_CONTEXT_PARAMETERS, RESEARCH_PACKET_V1_SCHEMA } from "../src/packet.ts";
+import { INSPECT_CONTEXT_PARAMETERS, POLICY_VERSION, RESEARCH_PACKET_V1_SCHEMA } from "../src/packet.ts";
 import { createInspectContextTool } from "../src/adapter.ts";
 
 function shellQuote(value: string): string {
@@ -26,7 +26,7 @@ const packet = {
   matches: [{ excerptId: "e1", path: "src/a.ts", startLine: 1, endLine: 1, confidence: "observed", reason: "literal match" }],
   excerpts: [{ id: "e1", path: "src/a.ts", startLine: 1, endLine: 1, kind: "match", text }],
   unknowns: [], omissions: [],
-  receipt: { packetId: "packet", schemaVersion: 1, policyVersion: "inspect-context-mini-v1", snapshotId: "snapshot", durationMs: 1, discoveredFiles: 1, readFiles: 1, bytesRead: text.length, excerptCount: 1, omissionCount: 0 }
+  receipt: { packetId: "packet", schemaVersion: 1, policyVersion: ${JSON.stringify(POLICY_VERSION)}, snapshotId: "snapshot", durationMs: 1, discoveredFiles: 1, readFiles: 1, bytesRead: text.length, excerptCount: 1, omissionCount: 0 }
 };
 process.stdout.write(JSON.stringify(packet));
 `;
@@ -55,11 +55,25 @@ test("registers exactly one direct sequential closed-world read-only tool", () =
 	assert.equal(tool.executionMode, "sequential");
 	assert.deepEqual(tool.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
 	assert.equal(tool.parameters, INSPECT_CONTEXT_PARAMETERS);
+	assert.deepEqual(Object.keys(tool.parameters.properties), ["query"]);
 	assert.equal(tool.outputSchema, RESEARCH_PACKET_V1_SCHEMA);
 	assert.equal(Value.Check(INSPECT_CONTEXT_PARAMETERS, { query: "needle" }), true);
 	assert.equal(Value.Check(INSPECT_CONTEXT_PARAMETERS, { query: "needle", root: "/tmp" }), false);
-	assert.match(tool.description, /zero results are not proof of absence/);
+	assert.match(tool.description, /bounded lexical/);
+	assert.match(tool.description, /loadUserProfile/);
+	assert.match(tool.description, /\/health\/ready/);
+	assert.match(tool.description, /CACHE_CONFIG_PATH/);
+	assert.match(tool.description, /combine 2-5 exact anchors/);
+	assert.match(tool.description, /use the returned paths first/);
+	assert.match(tool.description, /repeat only for a missing branch/);
+	assert.match(tool.description, /zero, weak, or materially omitted evidence is not proof of absence/);
 	assert.match(tool.description, /ordinary repository investigation/);
+	assert.match(tool.parameters.properties.query.description ?? "", /loadUserProfile/);
+	assert.match(tool.parameters.properties.query.description ?? "", /\/health\/ready/);
+	assert.match(tool.parameters.properties.query.description ?? "", /CACHE_CONFIG_PATH/);
+	assert.match(tool.parameters.properties.query.description ?? "", /combine 2-5 exact anchors/);
+	assert.match(tool.parameters.properties.query.description ?? "", /use the returned paths first/);
+	assert.match(tool.parameters.properties.query.description ?? "", /repeat only for a missing branch/);
 });
 
 test("the registered handler returns identical compact content, details, and structured data", async () => {

@@ -76,7 +76,7 @@ func runWorkerGit(t *testing.T, root string, args ...string) {
 
 func TestWorkerFilesystemPacketCoversEvidenceCategories(t *testing.T) {
 	root := t.TempDir()
-	writeWorkerFile(t, root, "AGENTS.md", "Read this governing file.\n")
+	writeWorkerFile(t, root, "AGENTS.md", "Read this governing needle file.\n")
 	writeWorkerFile(t, root, "definition.go", "func needle() {}\n")
 	writeWorkerFile(t, root, "caller.go", "func run() { needle() }\n")
 	writeWorkerFile(t, root, "import.go", "import needle \"module\"\n")
@@ -104,6 +104,14 @@ func TestWorkerFilesystemPacketCoversEvidenceCategories(t *testing.T) {
 			t.Errorf("%s evidence is empty", test.name)
 		}
 	}
+	windows := make(map[string]struct{}, len(packet.Excerpts))
+	for _, item := range packet.Excerpts {
+		key := fmt.Sprintf("%s:%d-%d:%s", item.Path, item.StartLine, item.EndLine, item.Text)
+		if _, duplicate := windows[key]; duplicate {
+			t.Fatalf("excerpt window was duplicated across categories: %+v", item)
+		}
+		windows[key] = struct{}{}
+	}
 	if _, err := os.Stat(filepath.Join(root, "should-not-exist")); !os.IsNotExist(err) {
 		t.Fatal("repository text was executed")
 	}
@@ -130,7 +138,7 @@ func TestWorkerGitInventoryExcludesIgnoredFiles(t *testing.T) {
 	if packet.Target.Repository != "git" {
 		t.Fatalf("repository kind = %q", packet.Target.Repository)
 	}
-	for _, item := range packet.Matches {
+	for _, item := range packet.Excerpts {
 		if strings.Contains(item.Path, "ignored") {
 			t.Fatalf("ignored path appeared in packet: %+v", item)
 		}
@@ -175,8 +183,8 @@ func TestWorkerSupportsUnbornGitRepository(t *testing.T) {
 	if packet.Target.Repository != "git" || packet.Snapshot.Revision != nil {
 		t.Fatalf("unexpected unborn Git packet: target=%+v snapshot=%+v", packet.Target, packet.Snapshot)
 	}
-	if len(packet.Matches) == 0 || packet.Matches[0].Path != "untracked.go" {
-		t.Fatalf("untracked file was not searched: %+v", packet.Matches)
+	if len(packet.Excerpts) == 0 || packet.Excerpts[0].Path != "untracked.go" {
+		t.Fatalf("untracked file was not searched: %+v", packet.Excerpts)
 	}
 }
 
@@ -242,8 +250,271 @@ func TestWorkerReportsNoMatchUncertainty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(packet.Matches) != 0 || !containsString(packet.Unknowns, "No literal matches were observed; this does not establish absence.") {
+	if len(packet.Matches) != 0 || !containsString(packet.Unknowns, "No lexical matches; retry with an exact symbol, route, config key, or path fragment.") {
 		t.Fatalf("no-match uncertainty missing: %+v", packet.Unknowns)
+	}
+}
+
+func TestWorkerRetrievalRankingAndFallback(t *testing.T) {
+	t.Run("exact precedence", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkerFile(t, root, "a-fallback.go", "func loadwidget() {}\n")
+		writeWorkerFile(t, root, "z-exact.go", "func LoadWidget() {}\n")
+		packet, _, err := invokeWorker(t, root, "LoadWidget")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Excerpts) == 0 || packet.Excerpts[0].Path != "z-exact.go" {
+			t.Fatalf("exact evidence did not rank first: %+v", packet.Excerpts)
+		}
+		if packet.Excerpts[0].Kind != "definition" {
+			t.Fatalf("exact evidence kind = %+v", packet.Excerpts[0])
+		}
+	})
+
+	t.Run("case insensitive content and path fallback", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkerFile(t, root, "health.go", "func ReadyCheck() {}\n")
+		packet, _, err := invokeWorker(t, root, "readycheck")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Excerpts) != 1 || packet.Excerpts[0].Path != "health.go" {
+			t.Fatalf("case-insensitive fallback = %+v", packet.Excerpts)
+		}
+
+		writeWorkerFile(t, root, "routes/health/ready.go", "package routes\nfunc Handler() {}\n")
+		packet, _, err = invokeWorker(t, root, "/health/ready")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Matches) == 0 || packet.Matches[0].Path != "routes/health/ready.go" || packet.Matches[0].Reason != "path match" {
+			t.Fatalf("path-only fallback = %+v", packet.Matches)
+		}
+	})
+
+	t.Run("route fragments and local co-occurrence outrank route noise", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkerFile(t, root, "src/app.ts", "const rootRouter = router();\nrootRouter.get('/health/ready', ready);\napp.use('/service', rootRouter);\n")
+		for _, name := range []string{"src/routes/accounts.ts", "src/routes/orders.ts", "src/routes/admin.ts"} {
+			writeWorkerFile(t, root, name, "const router = makeRouter();\n")
+		}
+		packet, _, err := invokeWorker(t, root, "status endpoint route registration and where its router is mounted under the /service prefix")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Excerpts) == 0 || packet.Excerpts[0].Path != "src/app.ts" {
+			t.Fatalf("local lexical context did not rank first: %+v", packet.Excerpts)
+		}
+	})
+
+	t.Run("route fragments do not match nested source or repository paths", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkerFile(t, root, "src/app.ts", "app.use('/service', rootRouter);\n")
+		writeWorkerFile(t, root, "src/service/noise.ts", "import '../common/service-schema';\n")
+		packet, _, err := invokeWorker(t, root, "/service")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Excerpts) == 0 || packet.Excerpts[0].Path != "src/app.ts" {
+			t.Fatalf("route literal did not outrank nested path noise: %+v", packet.Excerpts)
+		}
+	})
+
+	t.Run("empty path matches do not claim omitted excerpts", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkerFile(t, root, "routes/health/ready.go", "")
+		packet, _, err := invokeWorker(t, root, "/health/ready")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Excerpts) != 0 {
+			t.Fatalf("empty file produced evidence: %+v", packet.Excerpts)
+		}
+		for _, omission := range packet.Omissions {
+			if omission.Reason == "excerpt_limit" {
+				t.Fatalf("empty path match inflated excerpt omissions: %+v", packet.Omissions)
+			}
+		}
+	})
+
+	t.Run("rare and multi-term candidates outrank common noise", func(t *testing.T) {
+		root := t.TempDir()
+		for _, name := range []string{"file-a.go", "file-b.go", "file-c.go", "file-d.go", "file-e.go"} {
+			writeWorkerFile(t, root, name, "common signal\n")
+		}
+		writeWorkerFile(t, root, "rare.go", "rareKey signal\n")
+		writeWorkerFile(t, root, "multi.go", "common and rareKey\n")
+		packet, _, err := invokeWorker(t, root, "common rareKey")
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := make([]string, 0, len(packet.Excerpts))
+		for _, item := range packet.Excerpts {
+			paths = append(paths, item.Path)
+		}
+		if len(paths) < 3 || paths[0] != "multi.go" || paths[1] != "rare.go" || paths[2] != "file-a.go" {
+			t.Fatalf("lexical ranking = %v", paths)
+		}
+	})
+
+	t.Run("rare code-like terms retain evidence under score pressure", func(t *testing.T) {
+		root := t.TempDir()
+		for index := 0; index < maxExcerpts+8; index++ {
+			writeWorkerFile(t, root, fmt.Sprintf("dominant-%03d.go", index), "AlphaKey BetaKey\n")
+		}
+		writeWorkerFile(t, root, "rare.go", "GammaKey\n")
+		packet, _, err := invokeWorker(t, root, "AlphaKey BetaKey GammaKey")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range packet.Excerpts {
+			if item.Path == "rare.go" {
+				return
+			}
+		}
+		t.Fatalf("rare code-like term was omitted: %+v", packet.Excerpts)
+	})
+
+	t.Run("same-file truncation retains each code-like term", func(t *testing.T) {
+		root := t.TempDir()
+		var source strings.Builder
+		for index := 0; index < maxRetrievalCandidatesFile; index++ {
+			source.WriteString("AlphaKey(); BetaKey();\naway\nfrom\neach\nother\nnow\n")
+		}
+		source.WriteString("GammaKey();\n")
+		writeWorkerFile(t, root, "combined.go", source.String())
+		packet, _, err := invokeWorker(t, root, "AlphaKey BetaKey GammaKey")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range packet.Excerpts {
+			if strings.Contains(item.Text, "GammaKey") {
+				return
+			}
+		}
+		t.Fatalf("same-file term coverage was truncated: %+v", packet.Excerpts)
+	})
+
+}
+
+func TestWorkerRetrievalMergesContextWindowsAndTies(t *testing.T) {
+	t.Run("overlapping windows merge", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkerFile(t, root, "context.txt", "one\nalpha\nthree\nbeta\nfive\nsix\n")
+		packet, _, err := invokeWorker(t, root, "alpha beta")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Matches) != 1 {
+			t.Fatalf("merged matches = %+v", packet.Matches)
+		}
+		match := packet.Matches[0]
+		if match.StartLine != 1 || match.EndLine != 6 {
+			t.Fatalf("merged range = %d-%d", match.StartLine, match.EndLine)
+		}
+	})
+
+	t.Run("overlapping exact matches retain the excerpt line bound", func(t *testing.T) {
+		root := t.TempDir()
+		query := strings.Repeat("needle\n", maxExcerptLines)
+		writeWorkerFile(t, root, "bounded.txt", query+"needle\n")
+		packet, _, err := invokeWorker(t, root, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Matches) != 1 || packet.Matches[0].EndLine-packet.Matches[0].StartLine+1 > maxExcerptLines {
+			t.Fatalf("overlapping exact matches exceeded the line bound: %+v", packet.Matches)
+		}
+		for _, omission := range packet.Omissions {
+			if omission.Reason == "excerpt_limit" && omission.Count == 1 {
+				return
+			}
+		}
+		t.Fatalf("dropped overlap omission missing: %+v", packet.Omissions)
+	})
+
+	t.Run("ties use path order", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkerFile(t, root, "b.go", "tie\n")
+		writeWorkerFile(t, root, "a.go", "tie\n")
+		packet, _, err := invokeWorker(t, root, "tie")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Matches) < 2 || packet.Matches[0].Path != "a.go" || packet.Matches[1].Path != "b.go" {
+			t.Fatalf("tie ordering = %+v", packet.Matches)
+		}
+	})
+}
+
+func TestWorkerCandidateEvaluationBudget(t *testing.T) {
+	lineCount := maxRetrievalCandidateEvaluationsFile * 4
+	fileCount := maxDiscoveredFiles
+	text := strings.Repeat("_\n", lineCount)
+	files := make([]retrievalFile, 0, fileCount)
+	for index := 0; index < fileCount; index++ {
+		files = append(files, retrievalFile{path: fmt.Sprintf("dense-%02d.txt", index), text: text, lines: sourceLines(text)})
+	}
+	collection := collectRetrievalCandidates(files, "_", extractSearchTerms("_"))
+	expectedEvaluations := maxDiscoveredFiles * maxRetrievalCandidateEvaluationsFile
+	if collection.evaluatedCandidates != expectedEvaluations || collection.evaluatedCandidates > maxRetrievalCandidateEvaluations {
+		t.Fatalf("evaluated candidates = %d, want %d within %d", collection.evaluatedCandidates, expectedEvaluations, maxRetrievalCandidateEvaluations)
+	}
+	if collection.exactObserved != lineCount*fileCount {
+		t.Fatalf("observed exact matches = %d, want %d", collection.exactObserved, lineCount*fileCount)
+	}
+	if len(collection.candidates) > maxRetrievalCandidates {
+		t.Fatalf("retained candidates = %d, want at most %d", len(collection.candidates), maxRetrievalCandidates)
+	}
+
+	lateText := strings.Repeat("CommonKey();\n", maxRetrievalCandidateEvaluationsFile) + "LateBeta();\nLateGamma();\n"
+	lateTerms := extractSearchTerms("CommonKey LateBeta LateGamma")
+	lateCollection := collectRetrievalCandidates([]retrievalFile{{path: "late.go", text: lateText, lines: sourceLines(lateText)}}, "CommonKey LateBeta LateGamma", lateTerms)
+	if lateCollection.evaluatedCandidates != maxRetrievalCandidateEvaluationsFile+2 {
+		t.Fatalf("late-term evaluations = %d, want %d", lateCollection.evaluatedCandidates, maxRetrievalCandidateEvaluationsFile+2)
+	}
+	retainedTerms := make([]bool, len(lateTerms))
+	for _, candidate := range lateCollection.candidates {
+		for _, termIndex := range mergeTermIndexes(candidate.contentTerms, candidate.pathTerms) {
+			retainedTerms[termIndex] = true
+		}
+	}
+	for termIndex, retained := range retainedTerms {
+		if !retained {
+			t.Fatalf("late code-like term %q was not retained: %+v", lateTerms[termIndex].original, lateCollection.candidates)
+		}
+	}
+}
+
+func TestWorkerSearchTermsAndNoMatchStayBounded(t *testing.T) {
+	terms := extractSearchTerms("one two three four five six seven eight nine ten")
+	if len(terms) != maxSearchTerms {
+		t.Fatalf("term count = %d, want %d", len(terms), maxSearchTerms)
+	}
+	terms = extractSearchTerms("status endpoint route registration and where its router is mounted under the /service prefix")
+	termValues := make([]string, 0, len(terms))
+	for _, term := range terms {
+		termValues = append(termValues, term.lower)
+	}
+	if containsString(termValues, "and") || containsString(termValues, "where") || !containsString(termValues, "/service") || !containsString(termValues, "prefix") {
+		t.Fatalf("discriminating terms = %v", termValues)
+	}
+	if stopWords := extractSearchTerms("and the"); len(stopWords) != 1 || stopWords[0].lower != "and" {
+		t.Fatalf("all-stop-word query lost its lexical fallback: %+v", stopWords)
+	}
+
+	root := t.TempDir()
+	writeWorkerFile(t, root, "file.txt", "other\n")
+	packet, output, err := invokeWorker(t, root, "impossible-query-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) >= 2*1024 || len(packet.Excerpts) != 0 || len(packet.GoverningArtifacts) != 0 || len(packet.Matches) != 0 {
+		t.Fatalf("no-match packet was not compact: bytes=%d packet=%+v", len(output), packet)
+	}
+	if !containsString(packet.Unknowns, "No lexical matches; retry with an exact symbol, route, config key, or path fragment.") {
+		t.Fatalf("no-match retry guidance missing: %+v", packet.Unknowns)
 	}
 }
 
@@ -538,7 +809,7 @@ func TestWorkerGoverningExcerptHasExactNewlineTerminatedRanges(t *testing.T) {
 		t.Run(fmt.Sprintf("%d-lines", lines), func(t *testing.T) {
 			root := t.TempDir()
 			writeWorkerFile(t, root, "AGENTS.md", strings.Repeat("governing\n", lines))
-			packet, _, err := invokeWorker(t, root, "not-present")
+			packet, _, err := invokeWorker(t, root, strings.Repeat("governing\n", lines))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -593,15 +864,15 @@ func TestWorkerFindsMultilineLiteralAndOmitsOverlongRange(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(packet.Matches) != 0 {
-			t.Fatalf("overlong match was included: %+v", packet.Matches)
+		if len(packet.Matches) == 0 || packet.Matches[0].Reason != "lexical match" || packet.Matches[0].EndLine-packet.Matches[0].StartLine+1 > maxExcerptLines {
+			t.Fatalf("overlong exact match did not fall back to bounded lexical evidence: %+v", packet.Matches)
 		}
 		for _, omission := range packet.Omissions {
-			if omission.Reason == "excerpt_limit" && omission.Count == 1 && containsString(omission.Examples, "source.txt") {
+			if omission.Reason == "excerpt_limit" && omission.Count > 0 && len(omission.Examples) == 0 {
 				return
 			}
 		}
-		t.Fatalf("overlong match omission missing: %+v", packet.Omissions)
+		t.Fatalf("overlong exact-match omission was missing or named represented evidence: %+v", packet.Omissions)
 	})
 }
 
@@ -685,7 +956,7 @@ func TestWorkerScanBoundsRepeatedLiteralCandidates(t *testing.T) {
 		writeWorkerFile(t, root, fmt.Sprintf("file-%03d.txt", index), content)
 	}
 
-	packet, _, err := invokeWorker(t, root, "\n")
+	packet, _, err := invokeWorker(t, root, "line")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,6 +967,9 @@ func TestWorkerScanBoundsRepeatedLiteralCandidates(t *testing.T) {
 		if omission.Reason == "excerpt_limit" {
 			if omission.Count != totalMatches-maxEvidencePerCategory {
 				t.Fatalf("excerpt_limit count = %d, want %d", omission.Count, totalMatches-maxEvidencePerCategory)
+			}
+			if len(omission.Examples) != 0 {
+				t.Fatalf("excerpt_limit examples name represented evidence: %+v", omission.Examples)
 			}
 			return
 		}

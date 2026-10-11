@@ -1,8 +1,8 @@
 # pi-inspect-context
 
-A bounded, read-only Pi extension that maps one case-sensitive literal query to likely governing files, definitions, references, tests, configuration, and complete-line excerpts.
+A bounded, read-only Pi extension that maps one short symbol, route, config key, path fragment, or concept query to likely governing files, definitions, references, tests, configuration, and complete-line excerpts.
 
-`inspect_context` is a lexical discovery aid, not a semantic call graph. Zero results are not proof of absence; weak evidence or material omissions should be followed by another literal query or ordinary repository investigation.
+`inspect_context` is a bounded lexical discovery aid, not a semantic call graph. Exact identifiers such as `loadUserProfile`, `/health/ready`, and `CACHE_CONFIG_PATH` work best. For investigations spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Zero, weak, or materially omitted evidence is not proof of absence; continue with ordinary repository investigation when needed.
 
 ## Install
 
@@ -25,7 +25,7 @@ Installation runs the Go tests and builds `bin/inspect-context` for the current 
 The extension registers one direct, sequential, read-only tool:
 
 ```json
-{ "query": "literal symbol or behavior" }
+{ "query": "short symbol, route, config key, path fragment, or concept" }
 ```
 
 The root is derived only from Pi's `ctx.cwd`: the containing Git worktree when available, otherwise the validated current directory. Callers cannot supply a root, path, glob, regular expression, or command.

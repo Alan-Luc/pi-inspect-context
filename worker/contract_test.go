@@ -71,9 +71,17 @@ func TestStrictRequestValidation(t *testing.T) {
 		})
 	}
 
+	for _, query := range []string{"/health/ready", "cache refresh startup", "_"} {
+		if err := validateQuery(query); err != nil {
+			t.Fatalf("searchable query %q was rejected: %v", query, err)
+		}
+	}
+
 	for _, request := range []workerRequest{
 		{Version: 1, Root: "relative", Query: "needle"},
 		{Version: 1, Root: "/tmp/repository", Query: ""},
+		{Version: 1, Root: "/tmp/repository", Query: "   "},
+		{Version: 1, Root: "/tmp/repository", Query: "///***"},
 		{Version: 1, Root: "/tmp/repository", Query: strings.Repeat("é", maxQueryBytes/2+1)},
 		{Version: 2, Root: "/tmp/repository", Query: "needle"},
 	} {

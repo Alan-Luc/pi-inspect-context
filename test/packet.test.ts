@@ -47,7 +47,7 @@ function packet(text = "match"): ResearchPacketV1 {
 	};
 }
 
-test("normalizes the literal query before enforcing its UTF-8 byte limit", () => {
+test("normalizes searchable queries before enforcing the UTF-8 byte limit", () => {
 	assert.equal(normalizeQuery({ query: "e\u0301" }), "é");
 	assert.equal(normalizeQuery({ query: "é".repeat(MAX_QUERY_BYTES / 2) }).length, MAX_QUERY_BYTES / 2);
 	assert.throws(
@@ -56,9 +56,10 @@ test("normalizes the literal query before enforcing its UTF-8 byte limit", () =>
 	);
 });
 
-test("keeps meaningful whitespace and rejects malformed query objects", () => {
-	assert.equal(normalizeQuery({ query: "  " }), "  ");
-	for (const value of [null, [], {}, { query: "x", root: "/tmp" }, { query: 1 }, { query: "" }, { query: "a\0b" }]) {
+test("accepts exact and multi-term queries and rejects malformed or unsearchable input", () => {
+	assert.equal(normalizeQuery({ query: "/health/ready" }), "/health/ready");
+	assert.equal(normalizeQuery({ query: "cache refresh startup" }), "cache refresh startup");
+	for (const value of [null, [], {}, { query: "x", root: "/tmp" }, { query: 1 }, { query: "" }, { query: "a\0b" }, { query: "  " }, { query: "///***" }]) {
 		assert.throws(
 			() => normalizeQuery(value),
 			(error: unknown) => error instanceof InspectContextError && error.code === "invalid_query",
@@ -69,6 +70,7 @@ test("keeps meaningful whitespace and rejects malformed query objects", () => {
 test("publishes closed input, protocol, and output schemas", () => {
 	assert.equal(INSPECT_CONTEXT_PARAMETERS.additionalProperties, false);
 	assert.deepEqual(INSPECT_CONTEXT_PARAMETERS.required, ["query"]);
+	assert.match(INSPECT_CONTEXT_PARAMETERS.properties.query.description ?? "", /loadUserProfile.*\/health\/ready.*CACHE_CONFIG_PATH/);
 	assert.equal(WORKER_REQUEST_SCHEMA.additionalProperties, false);
 	assert.equal(AUTHORIZATION_MANIFEST_SCHEMA.additionalProperties, false);
 	assert.equal(RESEARCH_PACKET_V1_SCHEMA.additionalProperties, false);
@@ -91,7 +93,16 @@ test("matches the shared protocol goldens", async () => {
 	assert.equal(Value.Check(WORKER_REQUEST_SCHEMA, { ...request, extra: true }), false);
 });
 
-test("serializes compact packets and rejects packets above the byte budget", () => {
+test("serializes compact no-match packets and rejects packets above the byte budget", () => {
+	const noMatch = packet();
+	noMatch.matches = [];
+	noMatch.excerpts = [];
+	noMatch.unknowns = ["No lexical matches; retry with an exact symbol, route, config key, or path fragment."];
+	noMatch.receipt.excerptCount = 0;
+	const serializedNoMatch = serializePacket(noMatch);
+	assert.ok(Buffer.byteLength(serializedNoMatch, "utf8") < 2_048);
+	assert.equal(Value.Check(RESEARCH_PACKET_V1_SCHEMA, noMatch), true);
+
 	const compact = serializePacket(packet());
 	assert.equal(compact.includes("\n"), false);
 	assert.equal(Buffer.byteLength(compact, "utf8"), packetByteLength(packet()));
