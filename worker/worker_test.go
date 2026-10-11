@@ -639,10 +639,38 @@ func TestWorkerRejectsUnsafeGitPaths(t *testing.T) {
 		{name: "nested traversal", data: []byte("dir/../escape.txt\x00")},
 		{name: "missing terminal NUL", data: []byte("safe.txt")},
 		{name: "empty record", data: []byte("safe.txt\x00\x00")},
+		{name: "unexcluded directory", data: []byte("nested/repository/\x00")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := parseGitPaths(test.data); err == nil {
 				t.Fatal("unsafe Git record was accepted")
+			}
+		})
+	}
+}
+
+func TestWorkerGitInventorySkipsExcludedDirectoryRecords(t *testing.T) {
+	for _, directory := range []string{".harness", ".opencode", ".pi"} {
+		t.Run(directory, func(t *testing.T) {
+			root := t.TempDir()
+			if err := runGitInitForWorker(root); err != nil {
+				t.Fatal(err)
+			}
+			nested := filepath.Join(root, directory, "benchmark-worktrees", "sample")
+			if err := os.MkdirAll(nested, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := runGitInitForWorker(nested); err != nil {
+				t.Fatal(err)
+			}
+			writeWorkerFile(t, nested, "private.txt", "needle\n")
+
+			packet, _, err := invokeWorker(t, root, "needle")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(packet.Excerpts) != 0 || packet.Receipt.DiscoveredFiles != 0 || packet.Receipt.ReadFiles != 0 {
+				t.Fatalf("excluded directory was scanned: receipt=%+v excerpts=%+v", packet.Receipt, packet.Excerpts)
 			}
 		})
 	}

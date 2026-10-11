@@ -547,6 +547,12 @@ func parseGitPaths(data []byte) ([]string, error) {
 	paths := make([]string, 0, len(parts))
 	for _, part := range parts {
 		value := string(part)
+		if strings.HasSuffix(value, "/") {
+			directory := strings.TrimSuffix(value, "/")
+			if len([]byte(value)) <= maxPathBytes && safeRepositoryPath(directory) && exclusionReasonForDirectory(directory) != "" {
+				continue
+			}
+		}
 		if !safeRepositoryPath(value) {
 			return nil, fmt.Errorf("git inventory contains unsafe path %q", value)
 		}
