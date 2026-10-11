@@ -44,7 +44,7 @@ Each call starts one isolated Go worker, scans once, returns one packet, and exi
 - 80 complete lines per excerpt
 - 48 KiB compact packet
 
-Git repositories use tracked and untracked, non-ignored files. Non-Git directories use a deterministic bounded walk with fixed dependency, generated, build, and cache exclusions; it does not claim `.gitignore` parity. Snapshot mutation fails the call instead of returning mixed evidence.
+Git repositories use tracked and untracked, non-ignored files. Both modes exclude fixed dependency, generated, build, cache, and agent-state directories (`.pi`, `.opencode`, and `.harness`); non-Git walks do not claim `.gitignore` parity. Snapshot mutation fails the call instead of returning mixed evidence.
 
 ## Development
 

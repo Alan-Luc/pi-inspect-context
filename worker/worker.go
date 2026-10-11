@@ -590,7 +590,7 @@ func lstatRepositoryPath(root *os.Root, value string) (os.FileInfo, error) {
 
 var (
 	dependencyDirectoryNames = map[string]struct{}{
-		".git": {}, "node_modules": {}, "vendor": {}, "third_party": {}, "deps": {}, "Pods": {},
+		".git": {}, ".harness": {}, ".opencode": {}, ".pi": {}, "node_modules": {}, "vendor": {}, "third_party": {}, "deps": {}, "Pods": {},
 	}
 	generatedDirectoryNames = map[string]struct{}{
 		"dist": {}, "build": {}, "out": {}, "target": {}, "coverage": {}, ".cache": {}, ".next": {},
