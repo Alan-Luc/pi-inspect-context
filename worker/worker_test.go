@@ -2,6 +2,8 @@ package inspectcontext
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -141,6 +143,31 @@ func TestWorkerGitInventoryExcludesIgnoredFiles(t *testing.T) {
 	for _, item := range packet.Excerpts {
 		if strings.Contains(item.Path, "ignored") {
 			t.Fatalf("ignored path appeared in packet: %+v", item)
+		}
+	}
+}
+
+func TestWorkerGitDiscoveryFiltersTrackedExcludedMatches(t *testing.T) {
+	root := t.TempDir()
+	if err := runGitInitForWorker(root); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerFile(t, root, "src/visible.go", "needle\n")
+	writeWorkerFile(t, root, "node_modules/tracked.go", "needle\n")
+	runWorkerGit(t, root, "add", "--", "src/visible.go")
+	runWorkerGit(t, root, "add", "-f", "--", "node_modules/tracked.go")
+	runWorkerGit(t, root, "-c", "user.name=Inspect Context Test", "-c", "user.email=inspect-context@example.com", "commit", "--quiet", "-m", "initial")
+
+	packet, _, err := invokeWorker(t, root, "needle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.Receipt.DiscoveredFiles != 1 || packet.Receipt.ReadFiles != 1 {
+		t.Fatalf("excluded tracked match was admitted: %+v", packet.Receipt)
+	}
+	for _, item := range packet.Excerpts {
+		if item.Path != "src/visible.go" {
+			t.Fatalf("excluded tracked match appeared in evidence: %+v", packet.Excerpts)
 		}
 	}
 }
@@ -446,6 +473,19 @@ func TestWorkerRetrievalMergesContextWindowsAndTies(t *testing.T) {
 			t.Fatalf("tie ordering = %+v", packet.Matches)
 		}
 	})
+
+	t.Run("equal scores prefer shallower paths", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkerFile(t, root, "a/deep.go", "tie\n")
+		writeWorkerFile(t, root, "z.go", "tie\n")
+		packet, _, err := invokeWorker(t, root, "tie")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(packet.Matches) < 2 || packet.Matches[0].Path != "z.go" || packet.Matches[1].Path != "a/deep.go" {
+			t.Fatalf("depth tie ordering = %+v", packet.Matches)
+		}
+	})
 }
 
 func TestWorkerCandidateEvaluationBudget(t *testing.T) {
@@ -561,6 +601,525 @@ func TestWorkerPacketOrderingIsStable(t *testing.T) {
 	second.Receipt.DurationMS = 0
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("repeated scans were not deterministic:\nfirst=%+v\nsecond=%+v", first, second)
+	}
+}
+
+func workerSHA256(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func TestWorkerGitDiscoveryUsesFixedVectorsAndStdin(t *testing.T) {
+	root := t.TempDir()
+	markGitRoot(t, root)
+	writeWorkerFile(t, root, "src/config.go", "const CACHE_CONFIG_PATH = \"/etc/app\";\n")
+	logPath := filepath.Join(root, "git-call-log")
+	termHash := workerSHA256("CACHE_CONFIG_PATH")
+	installFakeGit(t, fmt.Sprintf(`
+log=%q
+record() {
+  printf 'argv' >> "$log"
+  for argument do printf '\037%%s' "$argument" >> "$log"; done
+  printf '\n' >> "$log"
+  env >> "$log"
+}
+record "$@"
+case "$*" in
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z") printf 'src/config.go\0';;
+"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
+  IFS= read -r term || exit 91
+  if command -v sha256sum >/dev/null 2>&1; then actual=$(printf '%%s' "$term" | sha256sum | cut -d' ' -f1); else actual=$(printf '%%s' "$term" | shasum -a 256 | cut -d' ' -f1); fi
+  [ "$actual" = %q ] || exit 92
+  if IFS= read -r extra; then exit 93; fi
+  printf 'grep-stdin-ok\n' >> "$log"
+  printf 'src/config.go\0';;
+esac
+`, logPath, termHash))
+
+	packet, _, err := invokeWorker(t, root, "CACHE_CONFIG_PATH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet.Excerpts) == 0 || packet.Excerpts[0].Path != "src/config.go" {
+		t.Fatalf("fixed-vector discovery did not return the match: %+v", packet.Excerpts)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := string(data)
+	if strings.Contains(log, "CACHE_CONFIG_PATH") {
+		t.Fatal("query text leaked into Git arguments, environment, or the call log")
+	}
+	if !strings.Contains(log, "grep-stdin-ok") {
+		t.Fatalf("Git grep did not receive one newline-terminated stdin term: %s", log)
+	}
+	for _, vector := range []struct {
+		name  string
+		value string
+		count int
+	}{
+		{name: "inventory", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fls-files\x1f--cached\x1f--others\x1f--exclude-standard\x1f-z\n", count: 2},
+		{name: "status", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fstatus\x1f--porcelain=v2\x1f-z\x1f--untracked-files=all\x1f--no-renames\n", count: 2},
+		{name: "grep", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fgrep\x1f--cached\x1f-F\x1f-i\x1f-I\x1f-l\x1f-z\x1f-f\x1f-\x1f--\n", count: 1},
+	} {
+		if got := strings.Count(log, vector.value); got != vector.count {
+			t.Errorf("%s vector count = %d, want %d", vector.name, got, vector.count)
+		}
+	}
+}
+
+func TestWorkerGitFsmonitorSentinelIsNotExecuted(t *testing.T) {
+	root := t.TempDir()
+	if err := runGitInitForWorker(root); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerFile(t, root, "tracked.go", "func needle() {}\n")
+	runWorkerGit(t, root, "add", "tracked.go")
+	runWorkerGit(t, root, "-c", "user.name=Inspect Context Test", "-c", "user.email=inspect-context@example.com", "commit", "--quiet", "-m", "initial")
+	sentinel := filepath.Join(root, "fsmonitor-sentinel")
+	marker := filepath.Join(root, "fsmonitor-invoked")
+	if err := os.WriteFile(sentinel, []byte(fmt.Sprintf("#!/bin/sh\nprintf invoked > %q\n", marker)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runWorkerGit(t, root, "config", "core.fsmonitor", sentinel)
+	if _, _, err := invokeWorker(t, root, "needle"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("repository-local fsmonitor sentinel was executed")
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerGitGrepExitAndOverflowFailures(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		grepBody  string
+		wantError bool
+	}{
+		{name: "no matches", grepBody: "exit 1"},
+		{name: "other exit", grepBody: "printf 'grep failed\\n' >&2; exit 7", wantError: true},
+		{name: "stdout overflow", grepBody: "exec /bin/dd if=/dev/zero bs=8388609 count=1 2>/dev/null", wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			markGitRoot(t, root)
+			writeWorkerFile(t, root, "src/file.go", "unrelated\n")
+			marker := filepath.Join(root, "grep-called")
+			installFakeGit(t, fmt.Sprintf(`
+case "$*" in
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z") printf 'src/file.go\0';;
+"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
+  printf called > %q
+  %s;;
+esac
+`, marker, test.grepBody))
+			_, _, err := invokeWorker(t, root, "NoSuchConfigKey")
+			called, readErr := os.ReadFile(marker)
+			if readErr != nil || string(called) != "called" {
+				t.Fatalf("grep was not invoked: %v", readErr)
+			}
+			if test.wantError {
+				if err == nil {
+					t.Fatal("Git grep failure was accepted")
+				}
+			} else if err != nil {
+				t.Fatalf("grep exit 1 should mean no matches: %v", err)
+			}
+		})
+	}
+}
+
+func TestWorkerNonASCIIQueryUsesBoundedGoPath(t *testing.T) {
+	root := t.TempDir()
+	markGitRoot(t, root)
+	writeWorkerFile(t, root, "unicode.go", "func CAFÉKEY() {}\n")
+	marker := filepath.Join(root, "grep-called")
+	installFakeGit(t, fmt.Sprintf(`
+case "$*" in
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z") printf 'unicode.go\0';;
+"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --") printf called > %q; exit 99;;
+esac
+`, marker))
+	packet, _, err := invokeWorker(t, root, "cafékey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet.Excerpts) == 0 || packet.Excerpts[0].Path != "unicode.go" {
+		t.Fatalf("non-ASCII bounded Go search missed the file: %+v", packet.Excerpts)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("non-ASCII query used Git grep")
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestWorkerGitDiscoveryFindsLateTrackedCandidate(t *testing.T) {
+	root := t.TempDir()
+	markGitRoot(t, root)
+	for index := 0; index < maxDiscoveredFiles; index++ {
+		writeWorkerFile(t, root, fmt.Sprintf("a-%04d.txt", index), "unrelated\n")
+	}
+	writeWorkerFile(t, root, "zzzz/LateGammaKey.go", "func LateGammaKey() {}\n")
+	installFakeGit(t, fmt.Sprintf(`
+case "$*" in
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z")
+  index=0
+  while [ "$index" -lt %d ]; do printf 'a-%%04d.txt\0' "$index"; index=$((index+1)); done
+  printf 'zzzz/LateGammaKey.go\0';;
+"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --") cat >/dev/null; printf 'zzzz/LateGammaKey.go\0';;
+esac
+`, maxDiscoveredFiles))
+	packet, _, err := invokeWorker(t, root, "LateGammaKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range packet.Excerpts {
+		if index >= 5 {
+			break
+		}
+		if item.Path == "zzzz/LateGammaKey.go" {
+			if packet.Receipt.ReadFiles != 1 || packet.Receipt.BytesRead != int64(len("func LateGammaKey() {}\n")) {
+				t.Fatalf("late candidate read accounting = %+v", packet.Receipt)
+			}
+			return
+		}
+	}
+	t.Fatalf("late tracked candidate was not in the first five excerpts: %+v", packet.Excerpts)
+}
+
+func TestWorkerGitCleanCandidateTailIsBounded(t *testing.T) {
+	root := t.TempDir()
+	markGitRoot(t, root)
+	totalCandidates := maxGitCleanCandidates + 5
+	for index := 0; index < totalCandidates; index++ {
+		writeWorkerFile(t, root, fmt.Sprintf("candidate-%03d.go", index), "needle\n")
+	}
+	installFakeGit(t, fmt.Sprintf(`
+case "$*" in
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z"|"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
+  index=0
+  while [ "$index" -lt %d ]; do printf 'candidate-%%03d.go\0' "$index"; index=$((index+1)); done;;
+"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+esac
+`, totalCandidates))
+
+	packet, _, err := invokeWorker(t, root, "needle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.Receipt.DiscoveredFiles != maxGitCleanCandidates || packet.Receipt.ReadFiles != maxGitCleanCandidates {
+		t.Fatalf("clean candidate receipt = %+v", packet.Receipt)
+	}
+	for _, omission := range packet.Omissions {
+		if omission.Reason == "file_limit" && omission.Count == totalCandidates-maxGitCleanCandidates {
+			return
+		}
+	}
+	t.Fatalf("clean candidate tail omission = %+v", packet.Omissions)
+}
+
+func TestWorkerConcurrentGitSearchesRemainDeterministic(t *testing.T) {
+	root := t.TempDir()
+	if err := runGitInitForWorker(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"AlphaKey", "BetaKey", "GammaKey", "DeltaKey"} {
+		writeWorkerFile(t, root, strings.ToLower(value)+".go", value+"\n")
+	}
+	runWorkerGit(t, root, "add", ".")
+	runWorkerGit(t, root, "-c", "user.name=Inspect Context Test", "-c", "user.email=inspect-context@example.com", "commit", "--quiet", "-m", "initial")
+
+	first, _, err := invokeWorker(t, root, "AlphaKey BetaKey GammaKey DeltaKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := invokeWorker(t, root, "AlphaKey BetaKey GammaKey DeltaKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Receipt.PacketID, second.Receipt.PacketID = "", ""
+	first.Receipt.DurationMS, second.Receipt.DurationMS = 0, 0
+	if !reflect.DeepEqual(first, second) {
+		t.Fatalf("concurrent Git discovery was nondeterministic:\nfirst:  %+v\nsecond: %+v", first, second)
+	}
+}
+
+func TestWorkerGitWorktreeContentReplacesCachedContent(t *testing.T) {
+	root := t.TempDir()
+	if err := runGitInitForWorker(root); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerFile(t, root, "tracked.go", "base\n")
+	runWorkerGit(t, root, "add", "tracked.go")
+	runWorkerGit(t, root, "-c", "user.name=Inspect Context Test", "-c", "user.email=inspect-context@example.com", "commit", "--quiet", "-m", "initial")
+	writeWorkerFile(t, root, "tracked.go", "StagedOnlyKey\n")
+	runWorkerGit(t, root, "add", "tracked.go")
+	stagedPacket, _, err := invokeWorker(t, root, "StagedOnlyKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stagedPacket.Excerpts) == 0 || stagedPacket.Excerpts[0].Path != "tracked.go" {
+		t.Fatalf("staged worktree content was not discovered: %+v", stagedPacket.Excerpts)
+	}
+	writeWorkerFile(t, root, "tracked.go", "WorktreeOnlyKey\n")
+
+	stagedPacket, _, err = invokeWorker(t, root, "StagedOnlyKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stagedPacket.Excerpts) != 0 {
+		t.Fatalf("cached staged content was not replaced: %+v", stagedPacket.Excerpts)
+	}
+	worktreePacket, _, err := invokeWorker(t, root, "WorktreeOnlyKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(worktreePacket.Excerpts) == 0 || worktreePacket.Excerpts[0].Path != "tracked.go" {
+		t.Fatalf("working-tree content was not authoritative: %+v", worktreePacket.Excerpts)
+	}
+	writeWorkerFile(t, root, "nested/untracked.go", "NestedUntrackedKey\n")
+	untrackedPacket, _, err := invokeWorker(t, root, "NestedUntrackedKey")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(untrackedPacket.Excerpts) == 0 || untrackedPacket.Excerpts[0].Path != "nested/untracked.go" {
+		t.Fatalf("nested untracked content was not discovered: %+v", untrackedPacket.Excerpts)
+	}
+}
+
+func TestWorkerGitNoMatchReceiptBounds(t *testing.T) {
+	t.Run("clean tracked files are not directly read", func(t *testing.T) {
+		root := t.TempDir()
+		if err := runGitInitForWorker(root); err != nil {
+			t.Fatal(err)
+		}
+		writeWorkerFile(t, root, "clean-a.txt", "other\n")
+		writeWorkerFile(t, root, "clean-b.txt", "different\n")
+		runWorkerGit(t, root, "add", "clean-a.txt", "clean-b.txt")
+		runWorkerGit(t, root, "-c", "user.name=Inspect Context Test", "-c", "user.email=inspect-context@example.com", "commit", "--quiet", "-m", "initial")
+		packet, output, err := invokeWorker(t, root, "impossible-query-123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if packet.Receipt.DiscoveredFiles != 0 || packet.Receipt.ReadFiles != 0 || packet.Receipt.BytesRead != 0 {
+			t.Fatalf("clean no-match receipt = %+v", packet.Receipt)
+		}
+		if len(output) >= 2*1024 || len(packet.Excerpts) != 0 {
+			t.Fatalf("clean no-match packet was not compact: bytes=%d packet=%+v", len(output), packet)
+		}
+	})
+
+	t.Run("dirty and nested untracked probes are charged", func(t *testing.T) {
+		root := t.TempDir()
+		if err := runGitInitForWorker(root); err != nil {
+			t.Fatal(err)
+		}
+		writeWorkerFile(t, root, "clean.txt", "clean\n")
+		writeWorkerFile(t, root, "tracked.txt", "tracked\n")
+		runWorkerGit(t, root, "add", "clean.txt", "tracked.txt")
+		runWorkerGit(t, root, "-c", "user.name=Inspect Context Test", "-c", "user.email=inspect-context@example.com", "commit", "--quiet", "-m", "initial")
+		writeWorkerFile(t, root, "tracked.txt", "dirty\n")
+		writeWorkerFile(t, root, "nested/noise.txt", "untracked\n")
+		packet, output, err := invokeWorker(t, root, "impossible-query-123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantBytes := int64(len("dirty\n") + len("untracked\n"))
+		if packet.Receipt.DiscoveredFiles != 2 || packet.Receipt.ReadFiles != 2 || packet.Receipt.BytesRead != wantBytes {
+			t.Fatalf("dirty no-match receipt = %+v, want discovered/read=2 bytes=%d", packet.Receipt, wantBytes)
+		}
+		if len(output) >= 2*1024 || len(packet.Excerpts) != 0 {
+			t.Fatalf("dirty no-match packet was not compact: bytes=%d packet=%+v", len(output), packet)
+		}
+		for _, omission := range packet.Omissions {
+			if omission.Reason == "file_limit" {
+				t.Fatalf("dirty no-match incorrectly counted a file limit: %+v", packet.Omissions)
+			}
+		}
+	})
+}
+
+func TestWorkerGitMatchAndStatusParsingContracts(t *testing.T) {
+	inventory := map[string]struct{}{
+		"src/main.go":               {},
+		"nested/untracked/file.txt": {},
+		"tracked.go":                {},
+		"conflict.go":               {},
+	}
+	t.Run("NUL match paths", func(t *testing.T) {
+		for _, test := range []struct {
+			name string
+			data []byte
+			want []string
+		}{
+			{name: "valid", data: []byte("src/main.go\x00nested/untracked/file.txt\x00"), want: []string{"src/main.go", "nested/untracked/file.txt"}},
+			{name: "empty", data: nil, want: []string{}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				got, err := parseGitMatchPaths(test.data, inventory)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, test.want) {
+					t.Fatalf("paths = %v, want %v", got, test.want)
+				}
+			})
+		}
+	})
+
+	t.Run("NUL match path rejection", func(t *testing.T) {
+		for _, test := range []struct {
+			name string
+			data []byte
+		}{
+			{name: "missing terminator", data: []byte("src/main.go")},
+			{name: "unsafe traversal", data: []byte("../escape.go\x00")},
+			{name: "duplicate", data: []byte("src/main.go\x00src/main.go\x00")},
+			{name: "unknown", data: []byte("unknown.go\x00")},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				if _, err := parseGitMatchPaths(test.data, inventory); err == nil {
+					t.Fatal("invalid Git match paths were accepted")
+				}
+			})
+		}
+	})
+
+	sha1Hash := strings.Repeat("1", 40)
+	sha256Hash := strings.Repeat("2", 64)
+	status := []byte("1 .M N... 100644 100644 100644 " + sha256Hash + " " + sha256Hash + " tracked.go\x00" +
+		"u UU N... 100644 100644 100644 100644 " + sha1Hash + " " + sha1Hash + " " + sha1Hash + " conflict.go\x00" +
+		"? nested/untracked/file.txt\x00")
+	paths, err := parseGitStatusPaths(status, inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"tracked.go", "conflict.go", "nested/untracked/file.txt"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("status paths = %v, want %v", paths, want)
+	}
+	for _, test := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "missing status terminator", data: []byte("? nested/untracked/file.txt")},
+		{name: "malformed ordinary record", data: []byte("1 .M\x00")},
+		{name: "unsafe untracked path", data: []byte("? ../escape.txt\x00")},
+		{name: "duplicate path", data: []byte("? nested/untracked/file.txt\x00? nested/untracked/file.txt\x00")},
+		{name: "unknown path", data: []byte("? unknown.txt\x00")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := parseGitStatusPaths(test.data, inventory); err == nil {
+				t.Fatal("invalid Git status was accepted")
+			}
+		})
+	}
+}
+
+func TestWorkerGitCandidateOrderingContract(t *testing.T) {
+	tupleTerms := []searchTerm{
+		{original: "AlphaKey", lower: "alphakey", codeLike: true},
+		{original: "beta", lower: "beta"},
+		{original: "RareKey", lower: "rarekey", codeLike: true},
+		{original: "plainrare", lower: "plainrare"},
+	}
+	coverageTerms := []searchTerm{
+		{original: "common", lower: "common"},
+		{original: "RareKey", lower: "rarekey", codeLike: true},
+		{original: "plainrare", lower: "plainrare"},
+		{original: "CodeTie", lower: "codetie", codeLike: true},
+	}
+	for _, test := range []struct {
+		name        string
+		query       string
+		terms       []searchTerm
+		candidates  []gitCandidate
+		frequencies []int
+		limit       int
+		want        []string
+	}{
+		{
+			name:  "tuple ordering and rarity",
+			query: "Exact",
+			terms: tupleTerms,
+			candidates: []gitCandidate{
+				{path: "Exact/AlphaKey/beta/RareKey/plainrare", pathTerms: []int{0, 1, 2, 3}},
+				{path: "z-two-content.go", contentTerms: []int{0, 1}},
+				{path: "b-code.go", contentTerms: []int{2}},
+				{path: "a-rare.go", contentTerms: []int{1}},
+				{path: "m-path.go", pathTerms: []int{1, 2}},
+				{path: "c-common.go", contentTerms: []int{0}},
+			},
+			frequencies: []int{4, 4, 1, 4},
+			limit:       maxDiscoveredFiles,
+			want:        []string{"Exact/AlphaKey/beta/RareKey/plainrare", "z-two-content.go", "b-code.go", "c-common.go", "a-rare.go", "m-path.go"},
+		},
+		{
+			name:  "reserved exact path precedes base candidates",
+			query: "health/ready",
+			terms: []searchTerm{{original: "/health/ready", lower: "/health/ready", codeLike: true}},
+			candidates: []gitCandidate{
+				{path: "z-content.go", contentTerms: []int{0}},
+				{path: "routes/health/ready.go", pathTerms: []int{0}},
+				{path: "a-health-ready.go", pathTerms: []int{0}},
+			},
+			frequencies: []int{3},
+			limit:       maxDiscoveredFiles,
+			want:        []string{"routes/health/ready.go", "z-content.go", "a-health-ready.go"},
+		},
+		{
+			name:  "coverage and deduplication happen before truncation",
+			terms: coverageTerms,
+			candidates: []gitCandidate{
+				{path: "00-common.go", contentTerms: []int{0}},
+				{path: "01-common-rare.go", contentTerms: []int{0, 1}},
+				{path: "02-plainrare.go", contentTerms: []int{2}},
+				{path: "03-code.go", contentTerms: []int{3}},
+				{path: "03-code.go", pathTerms: []int{2}},
+			},
+			frequencies: []int{20, 2, 2, 2},
+			limit:       3,
+			want:        []string{"01-common-rare.go", "03-code.go", "02-plainrare.go"},
+		},
+		{
+			name:  "path tie break",
+			terms: []searchTerm{{original: "term", lower: "term"}},
+			candidates: []gitCandidate{
+				{path: "b.go", contentTerms: []int{0}},
+				{path: "a.go", contentTerms: []int{0}},
+			},
+			frequencies: []int{4},
+			limit:       maxDiscoveredFiles,
+			want:        []string{"a.go", "b.go"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ordered := orderGitCandidates(test.candidates, test.query, test.terms, test.frequencies, test.limit)
+			paths := make([]string, 0, len(ordered))
+			for _, candidate := range ordered {
+				paths = append(paths, candidate.path)
+			}
+			if !reflect.DeepEqual(paths, test.want) {
+				t.Fatalf("candidate order = %v, want %v", paths, test.want)
+			}
+		})
 	}
 }
 
@@ -714,25 +1273,25 @@ func TestWorkerGitMetadataFailuresAreErrors(t *testing.T) {
 	}{
 		{
 			name: "rev-parse failure",
-			script: `case "$1:$2" in
+			script: `case "$3:$4" in
 rev-parse:--show-toplevel) exit 7;;
 esac`,
 		},
 		{
 			name: "mismatched top level",
-			script: `case "$1:$2" in
+			script: `case "$3:$4" in
 rev-parse:--show-toplevel) printf '/tmp\n';;
 esac`,
 		},
 		{
 			name: "malformed top level",
-			script: `case "$1:$2" in
+			script: `case "$3:$4" in
 rev-parse:--show-toplevel) printf '%s\nextra\n' "$PWD";;
 esac`,
 		},
 		{
 			name: "malformed HEAD",
-			script: `case "$1:$2" in
+			script: `case "$3:$4" in
 rev-parse:--show-toplevel) printf '%s\n' "$PWD";;
 rev-parse:--verify) printf 'deadbeef\nextra\n';;
 esac`,
@@ -757,7 +1316,7 @@ func TestWorkerGitInventoryFailureAndOverflow(t *testing.T) {
 	}{
 		{
 			name: "command failure",
-			script: `case "$1:$2" in
+			script: `case "$3:$4" in
 rev-parse:--show-toplevel) printf '%s\n' "$PWD";;
 rev-parse:--verify) printf 'deadbeef\n';;
 ls-files:*) printf 'inventory failed\n' >&2; exit 9;;
@@ -766,7 +1325,7 @@ esac`,
 		},
 		{
 			name: "stdout overflow",
-			script: `case "$1:$2" in
+			script: `case "$3:$4" in
 rev-parse:--show-toplevel) printf '%s\n' "$PWD";;
 rev-parse:--verify) printf 'deadbeef\n';;
 ls-files:*) exec /bin/dd if=/dev/zero bs=8388609 count=1 2>/dev/null;;
@@ -1014,7 +1573,7 @@ func TestWorkerDetectsScanTimeRootReplacement(t *testing.T) {
 	installFakeGit(t, `
 root=$(pwd -P)
 marker="${root}.replacement-marker"
-case "$1:$2" in
+case "$3:$4" in
 rev-parse:--show-toplevel) printf '%s\n' "$root";;
 rev-parse:--verify) printf 'deadbeef\n';;
 ls-files:*)

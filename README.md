@@ -34,17 +34,20 @@ The result is the same Research Packet V1 in text `content`, `details`, and `str
 
 ## Bounds
 
-Each call starts one isolated Go worker, scans once, returns one packet, and exits. V1 has no cache, daemon, index, watcher, or dependency graph.
+Each call starts one isolated Go worker, returns one packet, and exits. V1 has no cache, daemon, index, watcher, or dependency graph.
 
 - 4,096 query bytes after Unicode NFC normalization
-- 2,000 eligible files
+- 2,000 direct-read admissions; Git mode admits required non-clean/untracked probes first, then at most 64 clean tracked query candidates
 - 64 KiB per file
-- 8 MiB aggregate file reads
+- 8 MiB aggregate direct reads
 - 64 excerpts
 - 80 complete lines per excerpt
 - 48 KiB compact packet
+- 2-second worker timeout
 
-Git repositories use tracked and untracked, non-ignored files. Both modes exclude fixed dependency, generated, build, cache, and agent-state directories (`.pi`, `.opencode`, and `.harness`); non-Git walks do not claim `.gitignore` parity. Snapshot mutation fails the call instead of returning mixed evidence.
+For ASCII queries, Git repositories run one bounded fixed-string Git-index search per retained term (at most eight), with at most four searches concurrent, and select clean tracked candidates before direct reads. Query terms are sent through Git stdin, and Git-index scanning is bounded by process output and the worker timeout rather than included in `bytesRead`. Non-clean tracked and non-ignored untracked files are probed through the authorized repository root and count toward every direct-read limit. Queries requiring non-ASCII case folding retain the bounded Go scan.
+
+Both Git and filesystem modes exclude fixed dependency, generated, build, cache, and agent-state directories (`.pi`, `.opencode`, and `.harness`); non-Git walks do not claim `.gitignore` parity. Snapshot mutation fails the call instead of returning mixed evidence.
 
 ## Development
 

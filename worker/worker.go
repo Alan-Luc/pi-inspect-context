@@ -32,6 +32,8 @@ const (
 	maxExamplePathBytes  = 256
 
 	maxSearchTerms                       = 8
+	maxGitSearchWorkers                  = 4
+	maxGitCleanCandidates                = 64
 	maxRetrievalCandidatesFile           = 8
 	maxRetrievalCandidateEvaluationsFile = maxRetrievalCandidatesFile * 8
 	maxRetrievalCandidates               = maxExcerpts * 4
@@ -362,10 +364,11 @@ func readLimited(reader io.Reader, limit int) ([]byte, error) {
 }
 
 type repositoryInventory struct {
-	kind        string
-	entries     []inventoryEntry
-	fingerprint string
-	revision    *string
+	kind          string
+	entries       []inventoryEntry
+	fingerprint   string
+	revision      *string
+	worktreePaths map[string]struct{}
 }
 
 type inventoryEntry struct {
@@ -380,16 +383,19 @@ func collectInventory(repository *openedRepository) (repositoryInventory, error)
 		return repositoryInventory{}, err
 	}
 	var entries []inventoryEntry
+	var fingerprint string
+	var worktreePaths map[string]struct{}
 	if kind == "git" {
-		entries, err = collectGitInventory(repository)
+		entries, fingerprint, worktreePaths, err = collectGitInventory(repository, revision)
 	} else {
 		entries, err = collectFilesystemInventory(repository)
+		fingerprint = inventoryFingerprint(entries)
 	}
 	if err != nil {
 		return repositoryInventory{}, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
-	return repositoryInventory{kind: kind, entries: entries, fingerprint: inventoryFingerprint(entries), revision: revision}, nil
+	return repositoryInventory{kind: kind, entries: entries, fingerprint: fingerprint, revision: revision, worktreePaths: worktreePaths}, nil
 }
 
 func detectRepository(repository *openedRepository) (string, *string, error) {
@@ -403,7 +409,7 @@ func detectRepository(repository *openedRepository) (string, *string, error) {
 	if marker.Mode()&os.ModeSymlink != 0 {
 		return "", nil, errors.New("Git marker is a symlink")
 	}
-	result, err := runGit(repository, []string{"rev-parse", "--show-toplevel"}, 4096)
+	result, err := runGitMetadata(repository, []string{"rev-parse", "--show-toplevel"}, 4096)
 	if err != nil {
 		return "", nil, fmt.Errorf("Git rev-parse show-toplevel: %w", err)
 	}
@@ -424,7 +430,7 @@ func detectRepository(repository *openedRepository) (string, *string, error) {
 	if canonical != repository.path {
 		return "", nil, fmt.Errorf("Git top-level %q does not match authorized root %q", canonical, repository.path)
 	}
-	revisionResult, err := runGit(repository, []string{"rev-parse", "--verify", "--quiet", "HEAD"}, 4096)
+	revisionResult, err := runGitMetadata(repository, []string{"rev-parse", "--verify", "--quiet", "HEAD"}, 4096)
 	if err != nil {
 		return "", nil, fmt.Errorf("Git rev-parse HEAD: %w", err)
 	}
@@ -441,299 +447,59 @@ func detectRepository(repository *openedRepository) (string, *string, error) {
 	return "git", &value, nil
 }
 
-func parseGitLine(data []byte, label string) (string, error) {
-	if len(data) == 0 || !utf8.Valid(data) || bytes.IndexByte(data, 0) >= 0 || data[len(data)-1] != '\n' {
-		return "", fmt.Errorf("%s output is malformed", label)
-	}
-	value := strings.TrimSuffix(string(data), "\n")
-	if value == "" || strings.ContainsAny(value, "\r\n") || strings.TrimSpace(value) != value {
-		return "", fmt.Errorf("%s output is malformed", label)
-	}
-	return value, nil
-}
-
-func collectGitInventory(repository *openedRepository) ([]inventoryEntry, error) {
-	result, err := runGit(repository, []string{"ls-files", "--cached", "--others", "--exclude-standard", "-z"}, maxGitOutputBytes)
-	if err != nil {
-		return nil, err
-	}
-	if result.code != 0 {
-		return nil, fmt.Errorf("git inventory failed: %s", strings.TrimSpace(string(result.stderr)))
-	}
-	paths, err := parseGitPaths(result.stdout)
-	if err != nil {
-		return nil, err
-	}
-	entries := make([]inventoryEntry, 0, len(paths))
-	seen := make(map[string]struct{}, len(paths))
-	for _, path := range paths {
-		if _, ok := seen[path]; ok {
-			return nil, fmt.Errorf("git inventory contains duplicate path %q", path)
-		}
-		seen[path] = struct{}{}
-		info, err := lstatRepositoryPath(repository.root, path)
-		if errors.Is(err, fs.ErrNotExist) {
-			entries = append(entries, inventoryEntry{path: path, excluded: "ineligible_file"})
-			continue
-		}
+func readAdmittedFile(repository *openedRepository, entry inventoryEntry, result *scanResult) (*retrievalFile, error) {
+	expected := entry.info
+	if expected == nil {
+		var err error
+		expected, err = lstatRepositoryPath(repository.root, entry.path)
 		if err != nil {
+			return nil, fmt.Errorf("%w: inspect %q: %v", errSnapshotChanged, entry.path, err)
+		}
+		if expected.Mode()&os.ModeSymlink != 0 || !expected.Mode().IsRegular() {
+			return nil, fmt.Errorf("%w: file %q is not a regular file", errSnapshotChanged, entry.path)
+		}
+	}
+	if expected.Size() > maxFileBytes {
+		result.omissions.add("oversized_file", entry.path)
+		return nil, nil
+	}
+	if result.bytesRead+expected.Size() > maxAggregateReadBytes {
+		result.omissions.add("aggregate_byte_limit", entry.path)
+		return nil, nil
+	}
+	data, info, err := readRepositoryFile(repository.root, entry.path, expected)
+	if err != nil {
+		if errors.Is(err, errSnapshotChanged) {
 			return nil, err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("candidate path %q is a symlink", path)
-		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("candidate path %q is not a regular file", path)
-		}
-		entries = append(entries, inventoryEntry{path: path, info: info, excluded: exclusionReason(path)})
+		result.omissions.add("read_error", entry.path)
+		return nil, nil
 	}
-	return entries, nil
+	result.readFiles++
+	result.bytesRead += int64(len(data))
+	result.accepted[entry.path] = fingerprintFor(entry.path, info)
+	if bytes.IndexByte(data, 0) >= 0 {
+		result.omissions.add("binary_file", entry.path)
+		return nil, nil
+	}
+	if !utf8.Valid(data) {
+		result.omissions.add("invalid_utf8", entry.path)
+		return nil, nil
+	}
+	text := string(data)
+	return &retrievalFile{path: entry.path, text: text, lines: sourceLines(text)}, nil
 }
 
-func collectFilesystemInventory(repository *openedRepository) ([]inventoryEntry, error) {
-	entries := make([]inventoryEntry, 0)
-	entryCount := 0
-	err := fs.WalkDir(repository.root.FS(), ".", func(path string, item fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return fmt.Errorf("walk %q: %w", path, walkErr)
-		}
-		if path == "." {
-			return nil
-		}
-		entryCount++
-		if entryCount > maxFilesystemEntries {
-			return fmt.Errorf("filesystem entry traversal exceeded %d entries", maxFilesystemEntries)
-		}
-		if !safeRepositoryPath(path) {
-			return fmt.Errorf("filesystem inventory contains unsafe path %q", path)
-		}
-		info, err := lstatRepositoryPath(repository.root, path)
-		if err != nil {
-			return fmt.Errorf("inspect filesystem entry %q: %w", path, err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("filesystem candidate path %q is a symlink", path)
-		}
-		if item.IsDir() {
-			if !info.IsDir() {
-				return fmt.Errorf("filesystem directory changed: %q", path)
-			}
-			if reason := exclusionReasonForDirectory(path); reason != "" {
-				entries = append(entries, inventoryEntry{path: path, info: info, excluded: reason})
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("filesystem candidate path %q is not a regular file", path)
-		}
-		entries = append(entries, inventoryEntry{path: path, info: info, excluded: exclusionReason(path)})
-		return nil
-	})
+func appendAdmittedFile(repository *openedRepository, entry inventoryEntry, result *scanResult, files *[]retrievalFile) error {
+	result.discoveredFiles++
+	file, err := readAdmittedFile(repository, entry, result)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return entries, nil
-}
-
-func parseGitPaths(data []byte) ([]string, error) {
-	if len(data) == 0 {
-		return []string{}, nil
-	}
-	if data[len(data)-1] != 0 {
-		return nil, errors.New("git inventory is not NUL terminated")
-	}
-	parts := bytes.Split(data[:len(data)-1], []byte{0})
-	paths := make([]string, 0, len(parts))
-	for _, part := range parts {
-		value := string(part)
-		if strings.HasSuffix(value, "/") {
-			directory := strings.TrimSuffix(value, "/")
-			if len([]byte(value)) <= maxPathBytes && safeRepositoryPath(directory) && exclusionReasonForDirectory(directory) != "" {
-				continue
-			}
-		}
-		if !safeRepositoryPath(value) {
-			return nil, fmt.Errorf("git inventory contains unsafe path %q", value)
-		}
-		paths = append(paths, value)
-	}
-	return paths, nil
-}
-
-func safeRepositoryPath(value string) bool {
-	if value == "" || len([]byte(value)) > maxPathBytes || strings.IndexByte(value, 0) >= 0 || strings.ContainsRune(value, '\\') || strings.HasPrefix(value, "/") || !utf8.ValidString(value) {
-		return false
-	}
-	for _, part := range strings.Split(value, "/") {
-		if part == "" || part == "." || part == ".." {
-			return false
-		}
-	}
-	return true
-}
-
-func lstatRepositoryPath(root *os.Root, value string) (os.FileInfo, error) {
-	if !safeRepositoryPath(value) {
-		return nil, fmt.Errorf("unsafe repository path %q", value)
-	}
-	parts := strings.Split(value, "/")
-	for i := range parts {
-		current := strings.Join(parts[:i+1], "/")
-		info, err := root.Lstat(current)
-		if err != nil {
-			return nil, err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("repository path component %q is a symlink", current)
-		}
-		if i < len(parts)-1 && !info.IsDir() {
-			return nil, fmt.Errorf("repository path component %q is not a directory", current)
-		}
-	}
-	return root.Lstat(value)
-}
-
-var (
-	dependencyDirectoryNames = map[string]struct{}{
-		".git": {}, ".harness": {}, ".opencode": {}, ".pi": {}, "node_modules": {}, "vendor": {}, "third_party": {}, "deps": {}, "Pods": {},
-	}
-	generatedDirectoryNames = map[string]struct{}{
-		"dist": {}, "build": {}, "out": {}, "target": {}, "coverage": {}, ".cache": {}, ".next": {},
-		"tmp": {}, "bin": {}, "generated": {},
-	}
-)
-
-func exclusionReason(value string) string {
-	parts := strings.Split(value, "/")
-	return exclusionReasonForParts(parts[:len(parts)-1])
-}
-
-func exclusionReasonForDirectory(value string) string {
-	return exclusionReasonForParts(strings.Split(value, "/"))
-}
-
-func exclusionReasonForParts(parts []string) string {
-	for _, part := range parts {
-		if _, ok := dependencyDirectoryNames[part]; ok {
-			return "dependency_or_vendor"
-		}
-		if _, ok := generatedDirectoryNames[part]; ok {
-			return "generated_or_build"
-		}
-	}
-	return ""
-}
-
-func governingName(value string) bool {
-	name := filepath.Base(filepath.FromSlash(value))
-	switch name {
-	case "AGENTS.md", "README", "README.md", "README.txt", "package.json", "go.mod", "Cargo.toml", "pyproject.toml", "Makefile", "CMakeLists.txt", "pom.xml", "build.gradle":
-		return true
-	default:
-		return false
-	}
-}
-
-type fileFingerprint struct {
-	path    string
-	mode    os.FileMode
-	size    int64
-	modTime int64
-}
-
-func fingerprintFor(path string, info os.FileInfo) fileFingerprint {
-	return fileFingerprint{path: path, mode: info.Mode(), size: info.Size(), modTime: info.ModTime().UnixNano()}
-}
-
-func inventoryFingerprint(entries []inventoryEntry) string {
-	hash := sha256.New()
-	for _, entry := range entries {
-		if entry.info == nil {
-			fmt.Fprintf(hash, "%s\x00missing\x00%s\x00", entry.path, entry.excluded)
-			continue
-		}
-		fingerprint := fingerprintFor(entry.path, entry.info)
-		fmt.Fprintf(hash, "%s\x00%d\x00%d\x00%d\x00%s\x00", fingerprint.path, fingerprint.mode, fingerprint.size, fingerprint.modTime, entry.excluded)
-	}
-	return hex.EncodeToString(hash.Sum(nil))
-}
-
-func verifySnapshot(repository *openedRepository, before, after repositoryInventory, accepted map[string]fileFingerprint) error {
-	if before.kind != after.kind || !sameRevision(before.revision, after.revision) || before.fingerprint != after.fingerprint {
-		return errors.New("repository snapshot changed during scan")
-	}
-	currentRoot, err := os.Lstat(repository.path)
-	if err != nil || currentRoot.Mode()&os.ModeSymlink != 0 || !os.SameFile(repository.identity, currentRoot) {
-		return errors.New("authorized root changed during scan")
-	}
-	for path, expected := range accepted {
-		info, err := lstatRepositoryPath(repository.root, path)
-		if err != nil {
-			return fmt.Errorf("accepted file %q changed during scan: %w", path, err)
-		}
-		actual := fingerprintFor(path, info)
-		if actual != expected {
-			return fmt.Errorf("accepted file %q changed during scan", path)
-		}
+	if file != nil {
+		*files = append(*files, *file)
 	}
 	return nil
-}
-
-func sameRevision(left, right *string) bool {
-	if left == nil || right == nil {
-		return left == right
-	}
-	return *left == *right
-}
-
-type scanResult struct {
-	store     *evidenceStore
-	unknowns  []string
-	omissions *omissionAccumulator
-	accepted  map[string]fileFingerprint
-	readFiles int
-	bytesRead int64
-	ambiguous bool
-}
-
-type searchTerm struct {
-	original string
-	lower    string
-	codeLike bool
-}
-
-type retrievalFile struct {
-	path  string
-	text  string
-	lines []string
-}
-
-type retrievalCandidate struct {
-	fileIndex    int
-	path         string
-	startLine    int
-	endLine      int
-	exact        bool
-	contentTerms []int
-	pathTerms    []int
-	contextTerms []int
-	score        int64
-}
-
-type retrievalCollection struct {
-	candidates          []retrievalCandidate
-	exactObserved       int
-	fallbackObserved    int
-	evaluatedCandidates int
-}
-
-type retrievalWindow struct {
-	fileIndex  int
-	path       string
-	startLine  int
-	endLine    int
-	candidates []retrievalCandidate
 }
 
 func scanInventory(repository *openedRepository, query string, inventory repositoryInventory) (scanResult, error) {
@@ -747,48 +513,172 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 		return scanResult{}, errors.New("query has no searchable terms")
 	}
 	eligible := make([]inventoryEntry, 0, len(inventory.entries))
+	entriesByPath := make(map[string]inventoryEntry, len(inventory.entries))
 	for _, entry := range inventory.entries {
+		entriesByPath[entry.path] = entry
 		if entry.excluded != "" {
 			result.omissions.add(entry.excluded, entry.path)
 			continue
 		}
 		eligible = append(eligible, entry)
 	}
-	if len(eligible) > maxDiscoveredFiles {
-		result.omissions.addCount("file_limit", len(eligible)-maxDiscoveredFiles, nil)
-		eligible = eligible[:maxDiscoveredFiles]
-	}
-	files := make([]retrievalFile, 0, len(eligible))
-	for _, entry := range eligible {
-		if entry.info.Size() > maxFileBytes {
-			result.omissions.add("oversized_file", entry.path)
-			continue
+	files := make([]retrievalFile, 0, maxDiscoveredFiles)
+	if inventory.kind == "git" && !termsContainNonASCII(terms) {
+		worktree := make([]inventoryEntry, 0, len(inventory.worktreePaths))
+		for path := range inventory.worktreePaths {
+			entry, ok := entriesByPath[path]
+			if ok && entry.excluded == "" {
+				worktree = append(worktree, entry)
+			}
 		}
-		if result.bytesRead+entry.info.Size() > maxAggregateReadBytes {
-			result.omissions.add("aggregate_byte_limit", entry.path)
-			continue
-		}
-		data, info, err := readRepositoryFile(repository.root, entry.path, entry.info)
-		if err != nil {
-			if errors.Is(err, errSnapshotChanged) {
+		sort.Slice(worktree, func(left, right int) bool {
+			leftTerms := matchingPathTerms(strings.ToLower(worktree[left].path), terms)
+			rightTerms := matchingPathTerms(strings.ToLower(worktree[right].path), terms)
+			if (len(leftTerms) > 0) != (len(rightTerms) > 0) {
+				return len(leftTerms) > 0
+			}
+			return worktree[left].path < worktree[right].path
+		})
+		worktreeContent := make(map[string][]int, len(worktree))
+		for _, entry := range worktree {
+			if result.discoveredFiles >= maxDiscoveredFiles {
+				result.omissions.add("file_limit", entry.path)
+				continue
+			}
+			if err := appendAdmittedFile(repository, entry, &result, &files); err != nil {
 				return scanResult{}, err
 			}
-			result.omissions.add("read_error", entry.path)
-			continue
+			for _, file := range files {
+				if file.path == entry.path {
+					worktreeContent[entry.path] = matchingSearchTerms(strings.ToLower(file.text), terms)
+					break
+				}
+			}
 		}
-		result.readFiles++
-		result.bytesRead += int64(len(data))
-		result.accepted[entry.path] = fingerprintFor(entry.path, info)
-		if bytes.IndexByte(data, 0) >= 0 {
-			result.omissions.add("binary_file", entry.path)
-			continue
+		contentByPath := make(map[string][]int)
+		inventoryPaths := make(map[string]struct{}, len(entriesByPath))
+		for path := range entriesByPath {
+			inventoryPaths[path] = struct{}{}
 		}
-		if !utf8.Valid(data) {
-			result.omissions.add("invalid_utf8", entry.path)
-			continue
+		type gitSearchOutcome struct {
+			paths []string
+			err   error
 		}
-		text := string(data)
-		files = append(files, retrievalFile{path: entry.path, text: text, lines: sourceLines(text)})
+		searchOutcomes := make([]gitSearchOutcome, len(terms))
+		searchJobs := make(chan int)
+		var searchWait sync.WaitGroup
+		searchWorkers := minInt(maxGitSearchWorkers, len(terms))
+		for range searchWorkers {
+			searchWait.Add(1)
+			go func() {
+				defer searchWait.Done()
+				for termIndex := range searchJobs {
+					term := terms[termIndex]
+					grepResult, grepErr := runGitInput(repository, []string{"grep", "--cached", "-F", "-i", "-I", "-l", "-z", "-f", "-", "--"}, term.original+"\n", maxGitOutputBytes)
+					if grepErr != nil {
+						searchOutcomes[termIndex].err = fmt.Errorf("git grep term %q: %w", term.original, grepErr)
+						continue
+					}
+					if grepResult.code == 1 {
+						continue
+					}
+					if grepResult.code != 0 {
+						searchOutcomes[termIndex].err = fmt.Errorf("git grep term %q failed with exit code %d: %s", term.original, grepResult.code, strings.TrimSpace(string(grepResult.stderr)))
+						continue
+					}
+					matches, parseErr := parseGitMatchPaths(grepResult.stdout, inventoryPaths)
+					if parseErr != nil {
+						searchOutcomes[termIndex].err = parseErr
+						continue
+					}
+					searchOutcomes[termIndex].paths = matches
+				}
+			}()
+		}
+		for termIndex := range terms {
+			searchJobs <- termIndex
+		}
+		close(searchJobs)
+		searchWait.Wait()
+		for termIndex, outcome := range searchOutcomes {
+			if outcome.err != nil {
+				return scanResult{}, outcome.err
+			}
+			for _, path := range outcome.paths {
+				if _, dirty := inventory.worktreePaths[path]; dirty {
+					continue
+				}
+				entry := entriesByPath[path]
+				if entry.excluded == "" {
+					contentByPath[path] = append(contentByPath[path], termIndex)
+				}
+			}
+		}
+		candidates := make([]gitCandidate, 0, len(eligible))
+		for _, entry := range eligible {
+			if _, dirty := inventory.worktreePaths[entry.path]; dirty {
+				continue
+			}
+			contentTerms := normalizeTermIndexes(contentByPath[entry.path])
+			pathTerms := matchingPathTerms(strings.ToLower(entry.path), terms)
+			if len(contentTerms) > 0 || len(pathTerms) > 0 {
+				candidates = append(candidates, gitCandidate{path: entry.path, contentTerms: contentTerms, pathTerms: pathTerms})
+			}
+		}
+		allCandidates := append([]gitCandidate{}, candidates...)
+		for _, entry := range worktree {
+			allCandidates = append(allCandidates, gitCandidate{path: entry.path, contentTerms: worktreeContent[entry.path], pathTerms: matchingPathTerms(strings.ToLower(entry.path), terms)})
+		}
+		frequencies := make([]int, len(terms))
+		for _, candidate := range allCandidates {
+			for _, termIndex := range gitCandidateTerms(candidate) {
+				if termIndex >= 0 && termIndex < len(frequencies) {
+					frequencies[termIndex]++
+				}
+			}
+		}
+		ordered := orderGitCandidates(candidates, query, terms, frequencies, len(candidates))
+		remaining := maxDiscoveredFiles - result.discoveredFiles
+		if remaining < 0 {
+			remaining = 0
+		}
+		if remaining > maxGitCleanCandidates {
+			remaining = maxGitCleanCandidates
+		}
+		for index, candidate := range ordered {
+			if index >= remaining {
+				result.omissions.add("file_limit", candidate.path)
+				continue
+			}
+			if err := appendAdmittedFile(repository, entriesByPath[candidate.path], &result, &files); err != nil {
+				return scanResult{}, err
+			}
+		}
+	} else {
+		ordered := append([]inventoryEntry{}, eligible...)
+		if inventory.kind == "git" {
+			sort.Slice(ordered, func(left, right int) bool {
+				leftDirty := false
+				_, leftDirty = inventory.worktreePaths[ordered[left].path]
+				rightDirty := false
+				_, rightDirty = inventory.worktreePaths[ordered[right].path]
+				if leftDirty != rightDirty {
+					return leftDirty
+				}
+				return ordered[left].path < ordered[right].path
+			})
+		} else {
+			sort.Slice(ordered, func(left, right int) bool { return ordered[left].path < ordered[right].path })
+		}
+		for index, entry := range ordered {
+			if index >= maxDiscoveredFiles {
+				result.omissions.add("file_limit", entry.path)
+				continue
+			}
+			if err := appendAdmittedFile(repository, entry, &result, &files); err != nil {
+				return scanResult{}, err
+			}
+		}
 	}
 
 	collection := collectRetrievalCandidates(files, query, terms)
@@ -796,7 +686,6 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 	exactRepresented, fallbackRepresented := addRetrievalEvidence(&result, files, terms, windows)
 	result.omissions.addCount("excerpt_limit", collection.exactObserved-exactRepresented, nil)
 	result.omissions.addCount("excerpt_limit", collection.fallbackObserved-fallbackRepresented, nil)
-
 	if len(result.store.excerpts) == 0 {
 		result.unknowns = append(result.unknowns, "No lexical matches; retry with an exact symbol, route, config key, or path fragment.")
 	} else {
@@ -809,6 +698,15 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 		result.unknowns = append(result.unknowns, "Some files or evidence were omitted by bounded scanning; zero results do not prove absence.")
 	}
 	return result, nil
+}
+
+func termsContainNonASCII(terms []searchTerm) bool {
+	for _, term := range terms {
+		if strings.IndexFunc(term.original, func(value rune) bool { return value >= utf8.RuneSelf }) >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 var queryStopWords = map[string]struct{}{
@@ -988,6 +886,11 @@ func retrievalCandidateBefore(left, right retrievalCandidate) bool {
 		return left.score > right.score
 	}
 	if left.path != right.path {
+		leftDepth := strings.Count(left.path, "/")
+		rightDepth := strings.Count(right.path, "/")
+		if leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
 		return left.path < right.path
 	}
 	if left.startLine != right.startLine {
@@ -1734,11 +1637,7 @@ func makePacket(request workerRequest, inventory repositoryInventory, scan scanR
 		addPacketOmission(&packet, "excerpt_limit", pruned)
 	}
 	packetID := hashID(inventory.fingerprint + "\x00" + request.Query)
-	discoveredFiles := len(inventory.entries)
-	if discoveredFiles > maxDiscoveredFiles {
-		discoveredFiles = maxDiscoveredFiles
-	}
-	packet.Receipt = receipt{PacketID: packetID, SchemaVersion: 1, PolicyVersion: policyVersion, SnapshotID: inventory.fingerprint, DurationMS: time.Since(started).Milliseconds(), DiscoveredFiles: discoveredFiles, ReadFiles: scan.readFiles, BytesRead: scan.bytesRead, ExcerptCount: len(packet.Excerpts)}
+	packet.Receipt = receipt{PacketID: packetID, SchemaVersion: 1, PolicyVersion: policyVersion, SnapshotID: inventory.fingerprint, DurationMS: time.Since(started).Milliseconds(), DiscoveredFiles: scan.discoveredFiles, ReadFiles: scan.readFiles, BytesRead: scan.bytesRead, ExcerptCount: len(packet.Excerpts)}
 	packet = fitPacket(packet)
 	packet.Receipt.ExcerptCount = len(packet.Excerpts)
 	packet.Receipt.OmissionCount = omissionTotal(packet.Omissions)
@@ -1930,8 +1829,22 @@ type pipeResult struct {
 var gitStartMutex sync.Mutex
 
 func runGit(repository *openedRepository, args []string, outputLimit int) (commandResult, error) {
+	return runGitInput(repository, args, "", outputLimit)
+}
+
+func runGitMetadata(repository *openedRepository, args []string, outputLimit int) (commandResult, error) {
+	return runGitCommand(repository, args, "", outputLimit)
+}
+
+func runGitInput(repository *openedRepository, args []string, input string, outputLimit int) (commandResult, error) {
+	return runGitCommand(repository, args, input, outputLimit)
+}
+
+func runGitCommand(repository *openedRepository, args []string, input string, outputLimit int) (commandResult, error) {
+	args = append([]string{"-c", "core.fsmonitor=false"}, args...)
 	command := exec.Command("git", args...)
 	command.Env = gitEnvironment()
+	command.Stdin = strings.NewReader(input)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return commandResult{}, err
