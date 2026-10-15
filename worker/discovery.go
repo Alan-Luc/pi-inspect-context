@@ -504,6 +504,125 @@ type retrievalWindow struct {
 	candidates []retrievalCandidate
 }
 
+func retrievalWindowContentTerms(window retrievalWindow) []int {
+	indexes := []int{}
+	for _, candidate := range window.candidates {
+		indexes = mergeTermIndexes(indexes, candidate.contentTerms)
+	}
+	return indexes
+}
+
+func prioritizeRetrievalWindows(windows []retrievalWindow, terms []searchTerm) []retrievalWindow {
+	if len(windows) <= maxRetrievalWindowsFile {
+		return windows
+	}
+	selected := make([]bool, len(windows))
+	coveredTerms := make([]bool, len(terms))
+	selectedCount := 0
+	selectWindow := func(index int) {
+		if selected[index] || selectedCount >= maxRetrievalWindowsFile {
+			return
+		}
+		selected[index] = true
+		selectedCount++
+		for _, termIndex := range retrievalWindowContentTerms(windows[index]) {
+			coveredTerms[termIndex] = true
+		}
+	}
+	for index, window := range windows {
+		for _, candidate := range window.candidates {
+			if candidate.exact {
+				selectWindow(index)
+				break
+			}
+		}
+	}
+	for termIndex, term := range terms {
+		if !term.codeLike || coveredTerms[termIndex] || selectedCount >= maxRetrievalWindowsFile {
+			continue
+		}
+		for index, window := range windows {
+			if !selected[index] && containsTermIndex(retrievalWindowContentTerms(window), termIndex) {
+				selectWindow(index)
+				break
+			}
+		}
+	}
+	for selectedCount < maxRetrievalWindowsFile {
+		bestIndex, bestGain := -1, -1
+		for index, window := range windows {
+			if selected[index] {
+				continue
+			}
+			gain := 0
+			for _, termIndex := range retrievalWindowContentTerms(window) {
+				if !coveredTerms[termIndex] {
+					gain++
+				}
+			}
+			if gain > bestGain {
+				bestIndex, bestGain = index, gain
+			}
+		}
+		if bestIndex < 0 {
+			break
+		}
+		selectWindow(bestIndex)
+	}
+	result := make([]retrievalWindow, 0, maxRetrievalWindowsFile)
+	for index, window := range windows {
+		if selected[index] {
+			result = append(result, window)
+		}
+	}
+	return result
+}
+
+func selectRetrievalWindows(windows []retrievalWindow, terms []searchTerm) []retrievalWindow {
+	byPath := make(map[string][]retrievalWindow)
+	for _, window := range windows {
+		byPath[window.path] = append(byPath[window.path], window)
+	}
+	result := make([]retrievalWindow, 0, minInt(len(windows), primaryRetrievalWindowLimit))
+	emitted := make(map[string]struct{})
+	for _, window := range windows {
+		if _, found := emitted[window.path]; found {
+			continue
+		}
+		result = append(result, prioritizeRetrievalWindows(byPath[window.path], terms)...)
+		emitted[window.path] = struct{}{}
+	}
+	if len(result) > primaryRetrievalWindowLimit {
+		result = result[:primaryRetrievalWindowLimit]
+	}
+	return result
+}
+
+type retrievalWindowIdentity struct {
+	path               string
+	startLine, endLine int
+}
+
+func completeRetrievalWindows(primary, ranked []retrievalWindow) []retrievalWindow {
+	result := append([]retrievalWindow{}, primary...)
+	selected := make(map[retrievalWindowIdentity]struct{}, len(primary))
+	for _, window := range primary {
+		selected[retrievalWindowIdentity{path: window.path, startLine: window.startLine, endLine: window.endLine}] = struct{}{}
+	}
+	for _, window := range ranked {
+		if len(result) >= maxExcerpts {
+			break
+		}
+		identity := retrievalWindowIdentity{path: window.path, startLine: window.startLine, endLine: window.endLine}
+		if _, found := selected[identity]; found {
+			continue
+		}
+		result = append(result, window)
+		selected[identity] = struct{}{}
+	}
+	return result
+}
+
 type gitCandidate struct {
 	path         string
 	contentTerms []int

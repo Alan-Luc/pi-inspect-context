@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func canonicalWorkerRoot(t *testing.T, root string) string {
@@ -73,6 +74,19 @@ func runWorkerGit(t *testing.T, root string, args ...string) {
 	command.Env = gitEnvironment()
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %v failed: %v: %s", args, err, output)
+	}
+}
+
+func TestWorkerSourceRemainsInspectable(t *testing.T) {
+	info, err := os.Lstat("worker.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("worker.go mode = %v, want regular file", info.Mode())
+	}
+	if info.Size() > maxFileBytes {
+		t.Fatalf("worker.go is %d bytes, max inspectable size is %d", info.Size(), maxFileBytes)
 	}
 }
 
@@ -423,6 +437,150 @@ func TestWorkerRetrievalRankingAndFallback(t *testing.T) {
 		t.Fatalf("same-file term coverage was truncated: %+v", packet.Excerpts)
 	})
 
+}
+
+func TestSelectRetrievalWindows(t *testing.T) {
+	location := func(path string, line int, terms []int, exact bool, pathTerms ...int) retrievalWindow {
+		return retrievalWindow{
+			path: path, startLine: line, endLine: line,
+			candidates: []retrievalCandidate{{path: path, startLine: line, endLine: line, contentTerms: terms, pathTerms: pathTerms, exact: exact}},
+		}
+	}
+	for _, test := range []struct {
+		name    string
+		terms   []searchTerm
+		windows []retrievalWindow
+		want    []string
+	}{
+		{
+			name: "groups three content-diverse windows at the first path rank",
+			terms: []searchTerm{
+				{original: "POST", lower: "post", codeLike: true},
+				{original: "common", lower: "common"},
+				{original: "SEND_DTMF", lower: "send_dtmf", codeLike: true},
+			},
+			windows: []retrievalWindow{
+				location("commands.ts", 100, []int{1}, false, 0, 2),
+				location("other.ts", 10, []int{1}, false),
+				location("commands.ts", 1, []int{0}, false),
+				location("commands.ts", 200, []int{1}, false),
+				location("commands.ts", 400, []int{2}, false),
+			},
+			want: []string{"commands.ts:100", "commands.ts:1", "commands.ts:400", "other.ts:10"},
+		},
+		{
+			name:  "reserves exact evidence before other content terms",
+			terms: []searchTerm{{original: "AlphaKey", lower: "alphakey", codeLike: true}},
+			windows: []retrievalWindow{
+				location("exact.go", 10, nil, false),
+				location("other.go", 20, []int{0}, false),
+				location("exact.go", 50, []int{0}, false),
+				location("exact.go", 100, nil, false),
+				location("exact.go", 150, nil, true),
+			},
+			want: []string{"exact.go:10", "exact.go:50", "exact.go:150", "other.go:20"},
+		},
+		{
+			name: "covers code-like content terms in query order",
+			terms: []searchTerm{
+				{original: "FirstKey", lower: "firstkey", codeLike: true},
+				{original: "SecondKey", lower: "secondkey", codeLike: true},
+				{original: "ThirdKey", lower: "thirdkey", codeLike: true},
+				{original: "FourthKey", lower: "fourthkey", codeLike: true},
+			},
+			windows: []retrievalWindow{
+				location("ordered.go", 10, []int{3}, false),
+				location("ordered.go", 20, []int{2}, false),
+				location("ordered.go", 30, []int{1}, false),
+				location("ordered.go", 40, []int{0}, false),
+			},
+			want: []string{"ordered.go:20", "ordered.go:30", "ordered.go:40"},
+		},
+		{
+			name:  "maximizes remaining direct content-term coverage",
+			terms: []searchTerm{{lower: "one"}, {lower: "two"}, {lower: "three"}, {lower: "four"}},
+			windows: []retrievalWindow{
+				location("coverage.go", 10, []int{0}, false),
+				location("coverage.go", 20, nil, false),
+				location("coverage.go", 30, []int{1, 2}, false),
+				location("coverage.go", 40, []int{3}, false),
+			},
+			want: []string{"coverage.go:10", "coverage.go:30", "coverage.go:40"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			selected := selectRetrievalWindows(test.windows, test.terms)
+			got := make([]string, 0, len(selected))
+			for _, window := range selected {
+				got = append(got, fmt.Sprintf("%s:%d", window.path, window.startLine))
+				if window.startLine != window.endLine {
+					t.Fatalf("selector merged a line range: %+v", window)
+				}
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("selected windows = %v, want %v", got, test.want)
+			}
+			if repeated := selectRetrievalWindows(test.windows, test.terms); !reflect.DeepEqual(selected, repeated) {
+				t.Fatalf("selector output changed across identical calls: first=%+v second=%+v", selected, repeated)
+			}
+		})
+	}
+}
+
+func TestCompleteRetrievalWindows(t *testing.T) {
+	window := func(path string, line int) retrievalWindow {
+		return retrievalWindow{path: path, startLine: line, endLine: line}
+	}
+	labels := func(windows []retrievalWindow) []string {
+		result := make([]string, 0, len(windows))
+		for _, item := range windows {
+			result = append(result, fmt.Sprintf("%s:%d-%d", item.path, item.startLine, item.endLine))
+		}
+		return result
+	}
+	for _, test := range []struct {
+		name    string
+		primary []retrievalWindow
+		ranked  []retrievalWindow
+		want    []string
+	}{
+		{
+			name:    "restores a fourth same-file window",
+			primary: []retrievalWindow{window("a.go", 1), window("a.go", 2), window("a.go", 3)},
+			ranked:  []retrievalWindow{window("a.go", 1), window("a.go", 2), window("a.go", 3), window("a.go", 4)},
+			want:    []string{"a.go:1-1", "a.go:2-2", "a.go:3-3", "a.go:4-4"},
+		},
+		{
+			name:    "keeps original global tail order across files",
+			primary: []retrievalWindow{window("a.go", 30), window("b.go", 20)},
+			ranked:  []retrievalWindow{window("a.go", 10), window("b.go", 20), window("a.go", 30), window("c.go", 40)},
+			want:    []string{"a.go:30-30", "b.go:20-20", "a.go:10-10", "c.go:40-40"},
+		},
+		{
+			name:    "deduplicates promoted post-merge ranges",
+			primary: []retrievalWindow{window("a.go", 10)},
+			ranked:  []retrievalWindow{{path: "a.go", startLine: 10, endLine: 10, candidates: []retrievalCandidate{{exact: true}}}, window("b.go", 20)},
+			want:    []string{"a.go:10-10", "b.go:20-20"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			completed := completeRetrievalWindows(test.primary, test.ranked)
+			if got := labels(completed); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("completed windows = %v, want %v", got, test.want)
+			}
+			if repeated := completeRetrievalWindows(test.primary, test.ranked); !reflect.DeepEqual(completed, repeated) {
+				t.Fatalf("completion changed across identical calls: first=%+v second=%+v", completed, repeated)
+			}
+		})
+	}
+
+	ranked := make([]retrievalWindow, maxExcerpts+10)
+	for index := range ranked {
+		ranked[index] = window(fmt.Sprintf("file-%02d.go", index), index+1)
+	}
+	if completed := completeRetrievalWindows(ranked[:primaryRetrievalWindowLimit], ranked); len(completed) != maxExcerpts {
+		t.Fatalf("completed window count = %d, want %d", len(completed), maxExcerpts)
+	}
 }
 
 func TestWorkerRetrievalMergesContextWindowsAndTies(t *testing.T) {
@@ -1123,6 +1281,117 @@ func TestWorkerGitCandidateOrderingContract(t *testing.T) {
 	}
 }
 
+func TestWorkerRecallTailPacketPolicy(t *testing.T) {
+	if targetPacketBytes != 32_768 {
+		t.Fatalf("target packet bytes = %d, want 32768", targetPacketBytes)
+	}
+	const tailEvidenceCount = 7
+	for _, test := range []struct {
+		name         string
+		query        string
+		requiredPath string
+		setup        func(*testing.T, string)
+	}{
+		{
+			name:         "high-ranked query evidence survives",
+			query:        "Needle",
+			requiredPath: "00-priority.go",
+			setup: func(t *testing.T, root string) {
+				writeWorkerFile(t, root, "00-priority.go", "Needle\n")
+				for index := 0; index < primaryRetrievalWindowLimit+tailEvidenceCount-1; index++ {
+					writeWorkerFile(t, root, fmt.Sprintf("noise-%02d.go", index), "Needle\n")
+				}
+			},
+		},
+		{
+			name:         "rare code-like evidence survives",
+			query:        "AlphaKey BetaKey GammaKey",
+			requiredPath: "rare.go",
+			setup: func(t *testing.T, root string) {
+				for index := 0; index < primaryRetrievalWindowLimit+tailEvidenceCount-1; index++ {
+					writeWorkerFile(t, root, fmt.Sprintf("dominant-%02d.go", index), "AlphaKey BetaKey\n")
+				}
+				writeWorkerFile(t, root, "rare.go", "GammaKey\n")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			test.setup(t, root)
+			packet, output, err := invokeWorker(t, root, test.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantExcerpts := primaryRetrievalWindowLimit + tailEvidenceCount
+			if len(packet.Excerpts) != wantExcerpts {
+				t.Fatalf("excerpt count = %d, want %d", len(packet.Excerpts), wantExcerpts)
+			}
+			if len(output) > targetPacketBytes || len(output) > maxPacketBytes {
+				t.Fatalf("packet bytes = %d, target %d, hard bound %d", len(output), targetPacketBytes, maxPacketBytes)
+			}
+			if packet.Receipt.ExcerptCount != len(packet.Excerpts) || packet.Receipt.OmissionCount != omissionTotal(packet.Omissions) {
+				t.Fatalf("receipt counts are stale: %+v", packet.Receipt)
+			}
+			found := false
+			for _, item := range packet.Excerpts {
+				if item.Path == test.requiredPath {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("required evidence %q was omitted", test.requiredPath)
+			}
+			for _, omission := range packet.Omissions {
+				if omission.Reason == "excerpt_limit" {
+					t.Fatalf("recall tail was omitted: %+v", packet.Omissions)
+				}
+			}
+			if err := validatePacket(packet); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestWorkerRetainsPublicExcerptLimitWithGoverningEvidence(t *testing.T) {
+	store := newEvidenceStore()
+	store.setRank(0)
+	if !store.add("governing", "AGENTS.md", 1, 1, "rules\n", "observed", "governing artifact") {
+		t.Fatal("governing evidence was not added")
+	}
+	for index := 0; index < maxEvidencePerCategory; index++ {
+		store.setRank(index + 1)
+		if !store.add("test", fmt.Sprintf("tests/file-%02d.test.ts", index), 1, 1, "needle\n", "observed", "test path match") {
+			t.Fatalf("test evidence %d was not added", index)
+		}
+		if !store.add("configuration", fmt.Sprintf("config/file-%02d.yml", index), 1, 1, "needle\n", "observed", "configuration path match") {
+			t.Fatalf("configuration evidence %d was not added", index)
+		}
+	}
+	packet, err := makePacket(
+		workerRequest{Query: "needle"},
+		repositoryInventory{kind: "filesystem", fingerprint: "snapshot"},
+		scanResult{store: store, omissions: newOmissionAccumulator()},
+		time.Now(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet.Excerpts) != maxExcerpts {
+		t.Fatalf("excerpt count = %d, want %d", len(packet.Excerpts), maxExcerpts)
+	}
+	excerptLimit := 0
+	for _, omission := range packet.Omissions {
+		if omission.Reason == "excerpt_limit" {
+			excerptLimit = omission.Count
+		}
+	}
+	if excerptLimit != 1 || packet.Receipt.ExcerptCount != maxExcerpts || packet.Receipt.OmissionCount != 1 {
+		t.Fatalf("public limit accounting = omissions %+v receipt %+v", packet.Omissions, packet.Receipt)
+	}
+}
+
 func TestWorkerFitterKeepsCompactValidPacket(t *testing.T) {
 	packet := researchPacket{
 		Version:            1,
@@ -1142,11 +1411,70 @@ func TestWorkerFitterKeepsCompactValidPacket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded) > maxPacketBytes {
+	if len(encoded) > targetPacketBytes || len(encoded) > maxPacketBytes {
 		t.Fatalf("fitted packet is %d bytes", len(encoded))
 	}
 	if err := validatePacket(packet); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWorkerFitterTrimsRecallTailBeforePrimary(t *testing.T) {
+	const tailCount = 6
+	packet := researchPacket{
+		Version:            1,
+		Target:             packetTarget{Query: "needle", Root: ".", Repository: "filesystem"},
+		Snapshot:           packetSnapshot{ID: "snapshot", Validated: true},
+		GoverningArtifacts: []evidenceRef{}, Definitions: []evidenceRef{}, Callers: []evidenceRef{}, Imports: []evidenceRef{}, Tests: []evidenceRef{}, Configuration: []evidenceRef{}, Matches: []evidenceRef{},
+		Excerpts: []excerpt{}, Unknowns: []string{"bounded"}, Omissions: []omissionGroup{{Reason: "excerpt_limit", Count: 7, Examples: []string{}}},
+	}
+	for index := 0; index < primaryRetrievalWindowLimit+tailCount; index++ {
+		id := fmt.Sprintf("e-%02d", index)
+		text := "needle\n"
+		if index >= primaryRetrievalWindowLimit {
+			text = strings.Repeat("tail ", 1400)
+		}
+		packet.Excerpts = append(packet.Excerpts, excerpt{ID: id, Path: fmt.Sprintf("file-%02d.txt", index), StartLine: 1, EndLine: 1, Kind: "match", Text: text})
+		packet.Matches = append(packet.Matches, evidenceRef{ExcerptID: id, Path: fmt.Sprintf("file-%02d.txt", index), StartLine: 1, EndLine: 1, Confidence: "observed", Reason: "literal match"})
+	}
+	packet.Receipt = receipt{PacketID: "packet", SchemaVersion: 1, PolicyVersion: policyVersion, SnapshotID: "snapshot", ExcerptCount: len(packet.Excerpts), OmissionCount: omissionTotal(packet.Omissions)}
+	packet = fitPacket(packet)
+	if len(packet.Excerpts) < primaryRetrievalWindowLimit {
+		t.Fatalf("fitter removed primary windows: %d remain", len(packet.Excerpts))
+	}
+	for index := 0; index < primaryRetrievalWindowLimit; index++ {
+		if packet.Excerpts[index].ID != fmt.Sprintf("e-%02d", index) {
+			t.Fatalf("primary window %d changed: %+v", index, packet.Excerpts[index])
+		}
+	}
+	dropped := primaryRetrievalWindowLimit + tailCount - len(packet.Excerpts)
+	packetLimit := 0
+	for _, omission := range packet.Omissions {
+		if omission.Reason == "packet_limit" {
+			packetLimit = omission.Count
+		}
+	}
+	if dropped == 0 || packetLimit != dropped {
+		t.Fatalf("packet_limit count = %d, want dropped tail count %d", packetLimit, dropped)
+	}
+	if packet.Receipt.ExcerptCount != len(packet.Excerpts) || packet.Receipt.OmissionCount != omissionTotal(packet.Omissions) {
+		t.Fatalf("stale receipt counts: %+v", packet.Receipt)
+	}
+}
+
+func TestWorkerRejectsMetadataAboveCompactTarget(t *testing.T) {
+	_, err := makePacket(
+		workerRequest{Query: "needle"},
+		repositoryInventory{kind: "filesystem", fingerprint: "snapshot"},
+		scanResult{
+			store:     newEvidenceStore(),
+			unknowns:  []string{strings.Repeat("x", targetPacketBytes)},
+			omissions: newOmissionAccumulator(),
+		},
+		time.Now(),
+	)
+	if err == nil || !strings.Contains(err.Error(), "exceeds compact target") {
+		t.Fatalf("compact target error = %v", err)
 	}
 }
 
@@ -1626,7 +1954,7 @@ func TestWorkerFitterReservesQueryEvidenceAndFinalizesReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(encoded) > maxPacketBytes {
+	if len(encoded) > targetPacketBytes || len(encoded) > maxPacketBytes {
 		t.Fatalf("fitted packet is %d bytes", len(encoded))
 	}
 	if err := validatePacket(packet); err != nil {

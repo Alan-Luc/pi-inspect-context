@@ -35,6 +35,7 @@ const (
 	maxGitSearchWorkers                  = 4
 	maxGitCleanCandidates                = 64
 	maxRetrievalCandidatesFile           = 8
+	maxRetrievalWindowsFile              = 3
 	maxRetrievalCandidateEvaluationsFile = maxRetrievalCandidatesFile * 8
 	maxRetrievalCandidates               = maxExcerpts * 4
 	maxRetrievalCandidateEvaluations     = maxDiscoveredFiles * (maxRetrievalCandidateEvaluationsFile + maxSearchTerms)
@@ -683,6 +684,8 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 
 	collection := collectRetrievalCandidates(files, query, terms)
 	windows := buildRetrievalWindows(files, collection.candidates)
+	primaryWindows := selectRetrievalWindows(windows, terms)
+	windows = completeRetrievalWindows(primaryWindows, windows)
 	exactRepresented, fallbackRepresented := addRetrievalEvidence(&result, files, terms, windows)
 	result.omissions.addCount("excerpt_limit", collection.exactObserved-exactRepresented, nil)
 	result.omissions.addCount("excerpt_limit", collection.fallbackObserved-fallbackRepresented, nil)
@@ -1121,7 +1124,7 @@ func retrievalWindowsOverlap(left, right retrievalWindow) bool {
 }
 
 func buildRetrievalWindows(files []retrievalFile, candidates []retrievalCandidate) []retrievalWindow {
-	windows := make([]retrievalWindow, 0, maxExcerpts)
+	windows := make([]retrievalWindow, 0, maxRetrievalCandidates)
 	for _, candidate := range candidates {
 		lines := files[candidate.fileIndex].lines
 		if len(lines) == 0 {
@@ -1146,7 +1149,7 @@ func buildRetrievalWindows(files []retrievalFile, candidates []retrievalCandidat
 			}
 		}
 		if len(overlaps) == 0 {
-			if len(windows) < maxExcerpts {
+			if len(windows) < maxRetrievalCandidates {
 				windows = append(windows, incoming)
 			}
 			continue
@@ -1641,6 +1644,13 @@ func makePacket(request workerRequest, inventory repositoryInventory, scan scanR
 	packet = fitPacket(packet)
 	packet.Receipt.ExcerptCount = len(packet.Excerpts)
 	packet.Receipt.OmissionCount = omissionTotal(packet.Omissions)
+	encoded, err := json.Marshal(packet)
+	if err != nil {
+		return researchPacket{}, fmt.Errorf("encode packet: %w", err)
+	}
+	if len(encoded) > targetPacketBytes {
+		return researchPacket{}, fmt.Errorf("packet exceeds compact target of %d bytes", targetPacketBytes)
+	}
 	if err := validatePacket(packet); err != nil {
 		return researchPacket{}, err
 	}
@@ -1784,7 +1794,7 @@ func fitPacket(packet researchPacket) researchPacket {
 		packet.Receipt.ExcerptCount = len(packet.Excerpts)
 		packet.Receipt.OmissionCount = omissionTotal(packet.Omissions)
 		encoded, err := json.Marshal(packet)
-		if err == nil && len(encoded) <= maxPacketBytes {
+		if err == nil && len(encoded) <= targetPacketBytes {
 			return packet
 		}
 		if len(packet.Excerpts) == 0 {

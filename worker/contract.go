@@ -13,18 +13,20 @@ import (
 )
 
 const (
-	protocolVersion        = 1
-	policyVersion          = "inspect-context-mini-v2"
-	maxQueryBytes          = 4_096
-	maxPacketBytes         = 49_152
-	maxDiscoveredFiles     = 2_000
-	maxAggregateReadBytes  = 8_388_608
-	maxExcerpts            = 64
-	maxExcerptLines        = 80
-	maxEvidencePerCategory = 32
-	maxUnknowns            = 32
-	maxOmissionGroups      = 32
-	maxOmissionExamples    = 4
+	protocolVersion             = 1
+	policyVersion               = "inspect-context-mini-v5"
+	maxQueryBytes               = 4_096
+	maxPacketBytes              = 49_152
+	targetPacketBytes           = 32_768
+	maxDiscoveredFiles          = 2_000
+	maxAggregateReadBytes       = 8_388_608
+	maxExcerpts                 = 64
+	primaryRetrievalWindowLimit = 24
+	maxExcerptLines             = 80
+	maxEvidencePerCategory      = 32
+	maxUnknowns                 = 32
+	maxOmissionGroups           = 32
+	maxOmissionExamples         = 4
 )
 
 type workerRequest struct {
