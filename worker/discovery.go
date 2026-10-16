@@ -578,6 +578,57 @@ func prioritizeRetrievalWindows(windows []retrievalWindow, terms []searchTerm) [
 	return result
 }
 
+func readingPriorityRole(window retrievalWindow, files []retrievalFile, terms []searchTerm) string {
+	if isTestPath(window.path) || isConfigurationPath(window.path) || governingName(window.path) {
+		return ""
+	}
+	role := ""
+	for _, candidate := range window.candidates {
+		line := ""
+		if candidate.startLine >= 1 && candidate.startLine <= len(files[candidate.fileIndex].lines) {
+			line = files[candidate.fileIndex].lines[candidate.startLine-1]
+		}
+		for _, category := range classifyRetrievedCandidate(candidate.path, line, candidate, terms) {
+			if category.kind == "definition" {
+				return "definition"
+			}
+			if category.kind == "caller" {
+				role = "caller"
+			}
+		}
+	}
+	return role
+}
+
+func promoteReadingPriority(windows []retrievalWindow, files []retrievalFile, terms []searchTerm) []retrievalWindow {
+	if len(terms) == 0 {
+		return windows
+	}
+	for _, term := range terms {
+		if !term.codeLike || strings.HasPrefix(term.original, "/") {
+			return windows
+		}
+	}
+	var definitions, callers, supporting []retrievalWindow
+	for _, window := range windows {
+		switch readingPriorityRole(window, files, terms) {
+		case "definition":
+			definitions = append(definitions, window)
+		case "caller":
+			callers = append(callers, window)
+		default:
+			supporting = append(supporting, window)
+		}
+	}
+	if len(definitions) == 0 {
+		return windows
+	}
+	result := make([]retrievalWindow, 0, len(windows))
+	result = append(result, definitions...)
+	result = append(result, callers...)
+	return append(result, supporting...)
+}
+
 func selectRetrievalWindows(windows []retrievalWindow, terms []searchTerm) []retrievalWindow {
 	byPath := make(map[string][]retrievalWindow)
 	for _, window := range windows {

@@ -684,7 +684,7 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 
 	collection := collectRetrievalCandidates(files, query, terms)
 	windows := buildRetrievalWindows(files, collection.candidates)
-	primaryWindows := selectRetrievalWindows(windows, terms)
+	primaryWindows := selectRetrievalWindows(promoteReadingPriority(windows, files, terms), terms)
 	windows = completeRetrievalWindows(primaryWindows, windows)
 	exactRepresented, fallbackRepresented := addRetrievalEvidence(&result, files, terms, windows)
 	result.omissions.addCount("excerpt_limit", collection.exactObserved-exactRepresented, nil)
