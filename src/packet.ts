@@ -1,6 +1,6 @@
 import { Type, type Static } from "typebox";
 
-export const POLICY_VERSION = "inspect-context-mini-v5" as const;
+export const POLICY_VERSION = "inspect-context-mini-v6" as const;
 export const WORKER_PROTOCOL_VERSION = 1 as const;
 export const MAX_QUERY_BYTES = 4_096;
 export const MAX_DISCOVERED_FILES = 2_000;

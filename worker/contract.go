@@ -14,7 +14,7 @@ import (
 
 const (
 	protocolVersion             = 1
-	policyVersion               = "inspect-context-mini-v5"
+	policyVersion               = "inspect-context-mini-v6"
 	maxQueryBytes               = 4_096
 	maxPacketBytes              = 49_152
 	targetPacketBytes           = 32_768

@@ -1420,7 +1420,12 @@ func classifyMatch(path, line, query string) []matchCategory {
 
 func isTestPath(path string) bool {
 	lower := strings.ToLower(path)
-	return strings.Contains(lower, "/test/") || strings.HasPrefix(lower, "test/") || strings.Contains(lower, "/tests/") || strings.HasPrefix(lower, "tests/") || strings.HasSuffix(lower, "_test.go") || strings.Contains(lower, ".test.") || strings.Contains(lower, ".spec.")
+	name := filepath.Base(lower)
+	return strings.Contains(lower, "/test/") || strings.HasPrefix(lower, "test/") ||
+		strings.Contains(lower, "/tests/") || strings.HasPrefix(lower, "tests/") ||
+		strings.Contains("/"+lower, "/__tests__/") ||
+		strings.HasSuffix(lower, "_test.go") || strings.Contains(lower, ".test.") || strings.Contains(lower, ".spec.") ||
+		(strings.HasSuffix(name, ".py") && (strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_test.py")))
 }
 
 func isConfigurationPath(path string) bool {
