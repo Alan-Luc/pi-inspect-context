@@ -2,3 +2,6 @@ node_modules/
 *.tgz
 bin/*
 benchmark/
+bench/local/
+.harness/
+.pi/
