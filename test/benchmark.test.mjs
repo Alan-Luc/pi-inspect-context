@@ -47,6 +47,10 @@ test("private config inspects the original root without copying or changing its 
 		const report = await runBenchmark({config,adapterRoot,samples:10});
 		assert.equal(report.cases[0].recallAt5, 1);
 		assert.equal(report.cases[0].contentBytes, 12);
+		assert.match(report.cases[0].contractHash, /^[a-f0-9]{64}$/);
+		await writeFile(config, JSON.stringify({cases:[{id:"private",root,cwd:"app",query:"anotherSymbol",expected:[{path:"app/source.ts",line:1,kind:"definition"}]}]}));
+		const changedQuery = await runBenchmark({config,adapterRoot,samples:10});
+		assert.notEqual(changedQuery.cases[0].contractHash, report.cases[0].contractHash);
 	} finally {
 		await rm(scratch, {recursive:true,force:true});
 	}

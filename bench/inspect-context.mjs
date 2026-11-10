@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { cp, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -84,7 +85,8 @@ export async function runBenchmark(settings) {
 			elapsedAll.push(...elapsed);
 			const packet = result.details;
 			const bytes = measureBytes(packet, result.content.filter((block) => block.type === "text").map((block) => block.text).join(""));
-			results.push({ id: benchmarkCase.id, recallAt5: recallAt5(packet, [...new Set(benchmarkCase.expected.map(({ path }) => path))]), labelAccuracy: labelAccuracy(packet, benchmarkCase.expected), p50Ms: percentile(elapsed, 0.5), p95Ms: percentile(elapsed, 0.95), ...bytes });
+			const contractHash = createHash("sha256").update(JSON.stringify({root: benchmarkCase.root, cwd: relativeCwd, query: benchmarkCase.query, expected: benchmarkCase.expected})).digest("hex");
+			results.push({ id: benchmarkCase.id, contractHash, recallAt5: recallAt5(packet, [...new Set(benchmarkCase.expected.map(({ path }) => path))]), labelAccuracy: labelAccuracy(packet, benchmarkCase.expected), p50Ms: percentile(elapsed, 0.5), p95Ms: percentile(elapsed, 0.95), ...bytes });
 		}
 	} finally {
 		await rm(scratch, { recursive: true, force: true });

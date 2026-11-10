@@ -1,0 +1,50 @@
+name: Context benchmark
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+      - name: Prepare candidate
+        working-directory: candidate
+        run: |
+          npm ci --ignore-scripts --legacy-peer-deps
+          npm test
+      - name: Prepare base
+        working-directory: base
+        run: |
+          npm ci --ignore-scripts --legacy-peer-deps
+          npm run build --if-present
+      - name: Measure both revisions twice
+        working-directory: candidate
+        run: |
+          mkdir -p bench/local/ci
+          node --experimental-strip-types bench/inspect-context.mjs --adapter-root ../base --samples 10 --output bench/local/ci/base-1.json
+          node --experimental-strip-types bench/inspect-context.mjs --samples 10 --output bench/local/ci/candidate-1.json
+          node --experimental-strip-types bench/inspect-context.mjs --samples 10 --output bench/local/ci/candidate-2.json
+          node --experimental-strip-types bench/inspect-context.mjs --adapter-root ../base --samples 10 --output bench/local/ci/base-2.json
+      - name: Gate quality and repeated regressions
+        working-directory: candidate
+        run: node bench/compare.mjs bench/local/ci/base-1.json bench/local/ci/candidate-1.json bench/local/ci/base-2.json bench/local/ci/candidate-2.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fixture-benchmark
+          path: candidate/bench/local/ci/*.json

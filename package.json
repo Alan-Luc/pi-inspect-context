@@ -34,7 +34,7 @@
     "build": "node scripts/build-worker.mjs",
     "postinstall": "node scripts/build-worker.mjs",
     "test": "npm run test:node && npm run build && npm run test:integration",
-    "test:node": "node --experimental-strip-types --test test/packet.test.ts test/adapter.test.ts test/tool.test.ts test/benchmark.test.mjs",
+    "test:node": "node --experimental-strip-types --test test/packet.test.ts test/adapter.test.ts test/tool.test.ts test/benchmark.test.mjs test/benchmark-gate.test.mjs",
     "test:go": "cd worker && go test ./...",
     "test:integration": "node --experimental-strip-types --test test/integration.test.ts"
   }
