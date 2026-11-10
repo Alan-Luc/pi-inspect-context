@@ -1,6 +1,6 @@
 import { cp, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { labelAccuracy, measureBytes, percentile, recallAt5 } from "./metrics.mjs";
 
@@ -69,6 +69,10 @@ export async function runBenchmark(settings) {
 				await promisify(execFile)("git", ["add", "-A"], { cwd: root });
 			}
 			const cwd = resolve(root, benchmarkCase.cwd ?? ".");
+			const relativeCwd = relative(root, cwd);
+			if (relativeCwd === ".." || relativeCwd.startsWith(`..${sep}`) || isAbsolute(relativeCwd)) {
+				throw new Error("case cwd must remain inside its root");
+			}
 			await tool.execute("benchmark-warmup", { query: benchmarkCase.query }, undefined, undefined, { cwd });
 			const elapsed = [];
 			let result;

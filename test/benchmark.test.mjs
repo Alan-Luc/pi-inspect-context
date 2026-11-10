@@ -52,6 +52,26 @@ test("private config inspects the original root without copying or changing its 
 	}
 });
 
+test("configured cwd cannot escape its selected repository", async () => {
+	const scratch = await mkdtemp(join(tmpdir(), "benchmark-containment-"));
+	try {
+		const root = join(scratch, "repository");
+		const outside = join(scratch, "outside");
+		const adapterRoot = join(scratch, "adapter");
+		await mkdir(root);
+		await mkdir(outside);
+		await mkdir(join(adapterRoot, "src"), { recursive: true });
+		await writeFile(join(adapterRoot, "src/adapter.ts"), `export function createInspectContextTool() { return { execute: async () => ({details:{excerpts:[]},content:[{type:"text",text:"empty"}]}) }; }`);
+		const config = join(scratch, "config.json");
+		for (const cwd of ["../outside", outside]) {
+			await writeFile(config, JSON.stringify({cases:[{id:"escape",root,cwd,query:"symbol",expected:[{path:"source.ts",line:1,kind:"definition"}]}]}));
+			await assert.rejects(runBenchmark({config,adapterRoot,samples:10}), /cwd must remain inside its root/);
+		}
+	} finally {
+		await rm(scratch, {recursive:true,force:true});
+	}
+});
+
 test("public labels point to actual matching lines in all three fixture corpora", async () => {
 	assert.equal(new Set(fixtureCases.map(({root}) => root)).size, 3);
 	for (const fixture of fixtureCases) {
