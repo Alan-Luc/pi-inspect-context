@@ -91,6 +91,17 @@ func TestStrictRequestValidation(t *testing.T) {
 	}
 }
 
+func TestPacketRejectsCompleteNonBodyEvidence(t *testing.T) {
+	var packet researchPacket
+	if err := decodeStrict(fixture(t, "packet.json"), &packet); err != nil {
+		t.Fatal(err)
+	}
+	packet.Excerpts[0].BodyComplete = true
+	if err := validatePacket(packet); err == nil {
+		t.Fatal("complete body requires definition or caller evidence")
+	}
+}
+
 func TestPacketRejectsBrokenReferencesAndUnsafePaths(t *testing.T) {
 	var packet researchPacket
 	if err := decodeStrict(fixture(t, "packet.json"), &packet); err != nil {

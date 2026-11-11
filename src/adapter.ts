@@ -450,6 +450,9 @@ function validatePacketSemantics(packet: ResearchPacketV1, expectedQuery: string
 		if (excerpt.endLine < excerpt.startLine || excerpt.endLine - excerpt.startLine + 1 > MAX_EXCERPT_LINES || excerpt.text.length === 0) {
 			fail("invalid_response", `excerpts[${index}] has an invalid line range or empty text`);
 		}
+		if (excerpt.bodyComplete && excerpt.kind !== "definition" && excerpt.kind !== "caller") {
+			fail("invalid_response", `excerpts[${index}] complete body requires definition or caller kind`);
+		}
 		if (excerpts.has(excerpt.id)) fail("invalid_response", `duplicate excerpt id: ${excerpt.id}`);
 		excerpts.set(excerpt.id, excerpt);
 	}
@@ -578,7 +581,7 @@ export function createInspectContextTool(options: InspectContextToolOptions = {}
 	return {
 		name: "inspect_context",
 		label: "Inspect context",
-		description: "Find bounded lexical repository context for one short symbol, route, config key, path fragment, or concept query. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Results are read-only discovery aids: zero, weak, or materially omitted evidence is not proof of absence; use ordinary repository investigation when needed.",
+		description: "Find bounded lexical repository context for one short symbol, route, config key, path fragment, or concept query. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Results are read-only discovery aids: zero, weak, or materially omitted evidence is not proof of absence; use ordinary repository investigation when needed. Do not reread bodyComplete=true bodies; investigate only missing context.",
 		parameters: INSPECT_CONTEXT_PARAMETERS,
 		outputSchema: RESEARCH_PACKET_V1_SCHEMA,
 		executionMode: "sequential" as const,

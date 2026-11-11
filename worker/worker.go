@@ -1260,12 +1260,9 @@ func primaryMatchCategory(categories []matchCategory) (matchCategory, bool) {
 
 func addRetrievalEvidence(result *scanResult, files []retrievalFile, terms []searchTerm, windows []retrievalWindow) (int, int) {
 	exactRepresented, fallbackRepresented := 0, 0
+	expandedBodies := 0
 	for rank, window := range windows {
 		result.store.setRank(rank)
-		text := retrievalWindowText(files[window.fileIndex], window)
-		if text == "" {
-			continue
-		}
 		categories := make([]matchCategory, 0, 3)
 		for _, candidate := range window.candidates {
 			line := ""
@@ -1290,9 +1287,14 @@ func addRetrievalEvidence(result *scanResult, files []retrievalFile, terms []sea
 			}
 			primary = matchCategory{kind: "match", confidence: "observed", reason: reason}
 		}
-		matched := result.store.add(primary.kind, window.path, window.startLine, window.endLine, text, primary.confidence, primary.reason)
+		window = prepareEvidenceWindow(files[window.fileIndex], window, primary.kind, terms, &expandedBodies)
+		text := retrievalWindowText(files[window.fileIndex], window)
+		if text == "" {
+			continue
+		}
+		matched := result.store.add(primary.kind, window.path, window.startLine, window.endLine, text, primary.confidence, primary.reason, window.bodyComplete)
 		if !matched && primary.kind != "match" {
-			matched = result.store.add("match", window.path, window.startLine, window.endLine, text, "observed", "lexical match")
+			matched = result.store.add("match", window.path, window.startLine, window.endLine, text, "observed", "lexical match", false)
 		}
 		if matched {
 			for _, candidate := range window.candidates {
@@ -1532,7 +1534,7 @@ func (s *evidenceStore) setRank(rank int) {
 	s.rank = rank
 }
 
-func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, confidence, reason string) bool {
+func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, confidence, reason string, bodyComplete bool) bool {
 	category, ok := s.categories[kind]
 	if !ok {
 		return false
@@ -1554,7 +1556,7 @@ func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, con
 	if !exists {
 		s.seen[key] = id
 		s.excerptRanks[id] = s.rank
-		s.excerpts = append(s.excerpts, excerpt{ID: id, Path: path, StartLine: startLine, EndLine: endLine, Kind: kind, Text: text})
+		s.excerpts = append(s.excerpts, excerpt{ID: id, Path: path, StartLine: startLine, EndLine: endLine, Kind: kind, Text: text, BodyComplete: bodyComplete})
 	}
 	s.referenceSeen[referenceKey] = struct{}{}
 	s.categories[kind] = append(category, reference)

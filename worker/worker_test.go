@@ -595,8 +595,11 @@ func TestWorkerRetrievalMergesContextWindowsAndTies(t *testing.T) {
 			t.Fatalf("merged matches = %+v", packet.Matches)
 		}
 		match := packet.Matches[0]
-		if match.StartLine != 1 || match.EndLine != 6 {
+		if match.StartLine != 2 || match.EndLine != 4 {
 			t.Fatalf("merged range = %d-%d", match.StartLine, match.EndLine)
+		}
+		if len(packet.Excerpts) != 1 || packet.Excerpts[0].Text != "alpha\nthree\nbeta\n" {
+			t.Fatalf("merged matching text was lost: %+v", packet.Excerpts)
 		}
 	})
 
@@ -1357,15 +1360,15 @@ func TestWorkerRecallTailPacketPolicy(t *testing.T) {
 func TestWorkerRetainsPublicExcerptLimitWithGoverningEvidence(t *testing.T) {
 	store := newEvidenceStore()
 	store.setRank(0)
-	if !store.add("governing", "AGENTS.md", 1, 1, "rules\n", "observed", "governing artifact") {
+	if !store.add("governing", "AGENTS.md", 1, 1, "rules\n", "observed", "governing artifact", false) {
 		t.Fatal("governing evidence was not added")
 	}
 	for index := 0; index < maxEvidencePerCategory; index++ {
 		store.setRank(index + 1)
-		if !store.add("test", fmt.Sprintf("tests/file-%02d.test.ts", index), 1, 1, "needle\n", "observed", "test path match") {
+		if !store.add("test", fmt.Sprintf("tests/file-%02d.test.ts", index), 1, 1, "needle\n", "observed", "test path match", false) {
 			t.Fatalf("test evidence %d was not added", index)
 		}
-		if !store.add("configuration", fmt.Sprintf("config/file-%02d.yml", index), 1, 1, "needle\n", "observed", "configuration path match") {
+		if !store.add("configuration", fmt.Sprintf("config/file-%02d.yml", index), 1, 1, "needle\n", "observed", "configuration path match", false) {
 			t.Fatalf("configuration evidence %d was not added", index)
 		}
 	}

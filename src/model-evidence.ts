@@ -11,7 +11,11 @@ export function renderModelEvidence(packet: ResearchPacketV1): string {
 			path: excerpt.path,
 			lines: `${excerpt.startLine}-${excerpt.endLine}`,
 			text: excerpt.text,
+			bodyComplete: excerpt.bodyComplete,
 		})),
+		...(packet.excerpts.some((excerpt) => excerpt.bodyComplete) ? {
+			read: "Do not reread complete bodies; investigate only missing context.",
+		} : {}),
 		...(packet.unknowns.length ? { unknowns: packet.unknowns } : {}),
 		...(packet.omissions.length ? {
 			omissions: packet.omissions,

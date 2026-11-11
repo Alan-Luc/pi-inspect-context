@@ -497,11 +497,12 @@ type retrievalCollection struct {
 }
 
 type retrievalWindow struct {
-	fileIndex  int
-	path       string
-	startLine  int
-	endLine    int
-	candidates []retrievalCandidate
+	fileIndex    int
+	path         string
+	startLine    int
+	endLine      int
+	candidates   []retrievalCandidate
+	bodyComplete bool
 }
 
 func retrievalWindowContentTerms(window retrievalWindow) []int {

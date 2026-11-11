@@ -29,7 +29,7 @@ function packet(text = "match"): ResearchPacketV1 {
 		tests: [],
 		configuration: [],
 		matches: [],
-		excerpts: [{ id: "e1", path: "src/a.ts", startLine: 1, endLine: 1, kind: "match", text }],
+		excerpts: [{ id: "e1", path: "src/a.ts", startLine: 1, endLine: 1, kind: "match", text, bodyComplete: false }],
 		unknowns: ["Relations are lexical candidates, not a semantic call graph."],
 		omissions: [],
 		receipt: {

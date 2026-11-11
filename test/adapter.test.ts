@@ -38,7 +38,7 @@ function packet(query = "needle"): ResearchPacketV1 {
 		tests: [],
 		configuration: [],
 		matches: [{ excerptId: "e1", path: "src/a.ts", startLine: 1, endLine: 1, confidence: "observed", reason: "literal match" }],
-		excerpts: [{ id: "e1", path: "src/a.ts", startLine: 1, endLine: 1, kind: "match", text }],
+		excerpts: [{ id: "e1", path: "src/a.ts", startLine: 1, endLine: 1, kind: "match", text, bodyComplete: false }],
 		unknowns: [],
 		omissions: [],
 		receipt: {
@@ -229,6 +229,30 @@ fs.writeFileSync(${JSON.stringify(probe)}, JSON.stringify({
 		else process.env.INSPECT_CONTEXT_TEST_SECRET = oldSecret;
 		await directory.cleanup();
 		await workspace.cleanup();
+	}
+});
+
+test("accepts explicit complete bodies only for definitions and caller enclosures", () => {
+	const base = packet();
+	const reference = base.matches[0];
+	const complete = {
+		...base,
+		definitions: [reference],
+		matches: [],
+		excerpts: [{ ...base.excerpts[0], kind: "definition", text: "function needle() {}", bodyComplete: true }],
+	};
+	assert.doesNotThrow(() => parseWorkerResponse(Buffer.from(JSON.stringify(complete)), "needle"));
+	for (const [kind, category] of [
+		["match", "matches"], ["import", "imports"], ["test", "tests"],
+		["configuration", "configuration"], ["governing", "governingArtifacts"],
+	] as const) {
+		const invalid = {
+			...complete,
+			definitions: [],
+			[category]: [reference],
+			excerpts: [{ ...complete.excerpts[0], kind }],
+		};
+		assert.throws(() => parseWorkerResponse(Buffer.from(JSON.stringify(invalid)), "needle"), /complete.*body|body.*complete/i);
 	}
 });
 

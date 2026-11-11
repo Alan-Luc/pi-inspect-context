@@ -24,7 +24,7 @@ const packet = {
   snapshot: { id: "snapshot", validated: true },
   governingArtifacts: [], definitions: [], callers: [], imports: [], tests: [], configuration: [],
   matches: [{ excerptId: "e1", path: "src/a.ts", startLine: 1, endLine: 1, confidence: "observed", reason: "literal match" }],
-  excerpts: [{ id: "e1", path: "src/a.ts", startLine: 1, endLine: 1, kind: "match", text }],
+  excerpts: [{ id: "e1", path: "src/a.ts", startLine: 1, endLine: 1, kind: "match", text, bodyComplete: false }],
   unknowns: ["Lexical evidence, not a call graph."], omissions: [{reason:"file_limit",count:2,examples:["src/missing.ts"]}],
   receipt: { packetId: "packet", schemaVersion: 1, policyVersion: ${JSON.stringify(POLICY_VERSION)}, snapshotId: "snapshot", durationMs: 1, discoveredFiles: 1, readFiles: 1, bytesRead: text.length, excerptCount: 1, omissionCount: 2 }
 };
