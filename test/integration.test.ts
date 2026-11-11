@@ -36,7 +36,10 @@ test("the registered tool executes the packaged Go worker without executing repo
 		);
 		const packet = result.details;
 
-		assert.deepEqual(JSON.parse(result.content[0].text), packet);
+		assert.ok(Buffer.byteLength(result.content[0].text) <= Buffer.byteLength(JSON.stringify(packet)) / 2);
+		assert.match(result.content[0].text, /untrusted/i);
+		assert.match(result.content[0].text, /src\/feature\.go/);
+		assert.match(result.content[0].text, /func integratedNeedle/);
 		assert.deepEqual(result.structuredContent, packet);
 		assert.equal(packet.target.repository, "git");
 		assert.equal(packet.target.root, ".");

@@ -25,8 +25,8 @@ const packet = {
   governingArtifacts: [], definitions: [], callers: [], imports: [], tests: [], configuration: [],
   matches: [{ excerptId: "e1", path: "src/a.ts", startLine: 1, endLine: 1, confidence: "observed", reason: "literal match" }],
   excerpts: [{ id: "e1", path: "src/a.ts", startLine: 1, endLine: 1, kind: "match", text }],
-  unknowns: [], omissions: [],
-  receipt: { packetId: "packet", schemaVersion: 1, policyVersion: ${JSON.stringify(POLICY_VERSION)}, snapshotId: "snapshot", durationMs: 1, discoveredFiles: 1, readFiles: 1, bytesRead: text.length, excerptCount: 1, omissionCount: 0 }
+  unknowns: ["Lexical evidence, not a call graph."], omissions: [{reason:"file_limit",count:2,examples:["src/missing.ts"]}],
+  receipt: { packetId: "packet", schemaVersion: 1, policyVersion: ${JSON.stringify(POLICY_VERSION)}, snapshotId: "snapshot", durationMs: 1, discoveredFiles: 1, readFiles: 1, bytesRead: text.length, excerptCount: 1, omissionCount: 2 }
 };
 process.stdout.write(JSON.stringify(packet));
 `;
@@ -76,7 +76,7 @@ test("registers exactly one direct sequential closed-world read-only tool", () =
 	assert.match(tool.parameters.properties.query.description ?? "", /repeat only for a missing branch/);
 });
 
-test("the registered handler returns identical compact content, details, and structured data", async () => {
+test("the registered handler renders compact evidence and retains full structured JSON", async () => {
 	const directory = await makeDirectory("pi-inspect-context-tool-worker-");
 	const workspace = await makeDirectory("pi-inspect-context-tool-root-");
 	try {
@@ -87,8 +87,18 @@ test("the registered handler returns identical compact content, details, and str
 		const result = await tool.execute("call-1", { query: "needle" }, undefined, undefined, { cwd: workspace.root });
 		const content = result.content[0];
 		assert.equal(content.type, "text");
-		const parsed = JSON.parse(content.text);
-		assert.deepEqual(parsed, result.details);
+		assert.ok(Buffer.byteLength(content.text) <= Buffer.byteLength(JSON.stringify(result.details)) / 2);
+		assert.match(content.text, /src\/a\.ts/);
+		assert.match(content.text, /const needle = 1;/);
+		assert.match(content.text, /untrusted/i);
+		assert.match(content.text, /file_limit/);
+		assert.match(content.text, /src\/missing\.ts/);
+		assert.match(content.text, /refine|narrow|missing paths/i);
+		assert.match(content.text, /not a call graph/);
+		assert.doesNotMatch(content.text, /"receipt":|"excerpts":/);
+		assert.equal(result.details.excerpts[0].text, "const needle = 1;");
+		assert.equal(result.details.receipt.packetId, "packet");
+		assert.equal(result.details.matches[0].excerptId, "e1");
 		assert.deepEqual(result.structuredContent, result.details);
 		assert.equal(Value.Check(RESEARCH_PACKET_V1_SCHEMA, result.structuredContent), true);
 	} finally {

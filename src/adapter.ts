@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { Value } from "typebox/value";
 import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import { renderModelEvidence } from "./model-evidence.ts";
 import {
 	AUTHORIZATION_MANIFEST_SCHEMA,
 	INSPECT_CONTEXT_PARAMETERS,
@@ -591,7 +592,7 @@ export function createInspectContextTool(options: InspectContextToolOptions = {}
 		) => {
 			const packet = await inspectContext(ctx, params, { ...options, signal });
 			return {
-				content: [{ type: "text" as const, text: JSON.stringify(packet) }],
+				content: [{ type: "text" as const, text: renderModelEvidence(packet) }],
 				details: packet,
 				structuredContent: packet,
 			};
