@@ -14,6 +14,9 @@ func TestWorkerReturnsBoundedBodiesAndCallerEnclosures(t *testing.T) {
 	}{
 		{"javascript regex helper does not enclose caller", "caller.js", "export function serve() {\n  function helper() {\n    return /[{]/.test(input);\n  }\n  targetFn();\n}\nafterServe();\n", "targetFn", "caller", "targetFn()", 3, 7, false},
 		{"javascript inline regex helper does not enclose caller", "caller.js", "function serve() {\n  function hasBrace(s) { return /{/.test(s); }\n  targetFn();\n}\n", "targetFn", "caller", "function serve", 1, 4, false},
+		{"typescript uncertain capped definition keeps default window", "source.ts", "export function targetFn(): Promise<void> {\n  work();\n}\n" + strings.Repeat("function unrelated() { return 1; }\n", 100), "targetFn", "definition", "work();", 1, 3, false},
+		{"javascript uncertain capped definition keeps default window", "source.js", "function targetFn() {\n  return /}/;\n}\n" + strings.Repeat("function unrelated() { return 1; }\n", 100), "targetFn", "definition", "return /}/;", 1, 3, false},
+		{"python uncertain capped definition keeps default window", "source.py", "def target_fn():\n    return f\"{value}\"\n\n" + strings.Repeat("def unrelated():\n    return 1\n", 100), "target_fn", "definition", "return f", 1, 3, false},
 		{"javascript normal CRLF remains complete", "source.js", "function targetFn() {\r\n  work();\r\n}\r\n", "targetFn", "definition", "work()", 1, 3, true},
 		{"go nested braces and literals", "source.go", "func targetFn() {\n  if ready {\n    marker := \"}\"\n    /* } */\n    work()\n  }\n  done()\n}\n", "targetFn", "definition", "done()", 1, 8, true},
 		{"typescript member", "source.ts", "class Store {\n  targetFn() {\n    const marker = \"}\";\n    if (ready) {\n      work();\n    }\n    return marker;\n  }\n}\n", "targetFn", "definition", "return marker", 2, 8, true},

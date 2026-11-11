@@ -151,6 +151,7 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 	for number := startLine; number <= result.endLine; number++ {
 		code := bodyCodeLine(file.lines[number-1], extension, &state)
 		if state.uncertain {
+			result.found = result.endLine == len(file.lines)
 			return result
 		}
 		for _, character := range code {
@@ -191,6 +192,7 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 						ambiguousType := parametersEnd > 0 && strings.Contains(header.String()[parametersEnd:], ":") || strings.Count(prefix, "<") > strings.Count(prefix, ">")
 						ambiguousArrow := strings.Count(prefix, "=>") > 1 || strings.Contains(prefix, "=>") && (!arrowBodyPrefix.MatchString(prefix) || !strings.HasSuffix(strings.TrimSpace(prefix), "=>"))
 						if ambiguousArrow || ambiguousType {
+							result.found = result.endLine == len(file.lines)
 							return result
 						}
 					}
@@ -245,6 +247,7 @@ func pythonBody(file retrievalFile, startLine int) sourceBodyRange {
 		line := file.lines[number-1]
 		code := bodyCodeLine(line, ".py", &state)
 		if state.uncertain {
+			result.found = result.endLine == len(file.lines)
 			return result
 		}
 		if headerEnded && !continuation && strings.TrimSpace(code) != "" && pythonIndent(line) <= indent {
