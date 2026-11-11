@@ -13,8 +13,8 @@ var arrowBodyPrefix = regexp.MustCompile(`^(?:export\s+)?(?:const|let|var)\s+[^=
 var arrowHeaderStart = regexp.MustCompile(`^(?:export\s+)?(?:const|let|var)\s+[^=;]+\s*=\s*(?:async\s*)?\([^);{}]*$`)
 
 type sourceBodyRange struct {
-	startLine, endLine int
-	complete, found    bool
+	startLine, endLine        int
+	complete, found, enclosed bool
 }
 
 type bodyLexState struct {
@@ -68,10 +68,10 @@ func bodyCodeLine(line, extension string, state *bodyLexState) string {
 		}
 		character := line[index]
 		if character == '\'' || character == '"' || character == '`' {
-			// shortcut: Python f-strings stay partial, add tokenization when their complete bodies are needed.
+			// shortcut: Python f-strings and t-strings stay partial, add tokenization when their complete bodies are needed.
 			if extension == ".py" && index > 0 {
 				prefix := strings.ToLower(line[maxInt(0, index-2):index])
-				if strings.HasSuffix(prefix, "f") || strings.HasSuffix(prefix, "fr") {
+				if strings.HasSuffix(prefix, "f") || strings.HasSuffix(prefix, "fr") || strings.HasSuffix(prefix, "t") || strings.HasSuffix(prefix, "tr") {
 					state.uncertain = true
 				}
 			}
@@ -141,7 +141,7 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 		// shortcut: non-callable declarations stay partial, add syntax parsing when their complete bodies are needed.
 		declaration := declarationBodyPrefix.FindStringSubmatch(strings.ToLower(strings.TrimSpace(file.lines[startLine-1])))
 		if len(declaration) > 1 && declaration[1] != "function" {
-			return result
+			return sourceBodyRange{}
 		}
 	}
 	state := bodyLexState{}
@@ -157,11 +157,9 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 				} else if character == '}' {
 					bodyBraces--
 					if bodyBraces == 0 {
-						if state.uncertain {
-							return result
-						}
 						result.endLine = number
-						result.complete = state.quote == "" && !state.blockComment
+						result.enclosed = true
+						result.complete = !state.uncertain && state.quote == "" && !state.blockComment
 						return result
 					}
 				}
@@ -188,8 +186,13 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 					}
 					if javascriptPath(extension) {
 						ambiguousType := parametersEnd > 0 && strings.Contains(header.String()[parametersEnd:], ":") || strings.Count(prefix, "<") > strings.Count(prefix, ">")
-						ambiguousArrow := strings.Contains(prefix, "=>") && (!arrowBodyPrefix.MatchString(prefix) || !strings.HasSuffix(strings.TrimSpace(prefix), "=>"))
-						if ambiguousType || ambiguousArrow {
+						ambiguousArrow := strings.Count(prefix, "=>") > 1 || strings.Contains(prefix, "=>") && (!arrowBodyPrefix.MatchString(prefix) || !strings.HasSuffix(strings.TrimSpace(prefix), "=>"))
+						if ambiguousArrow {
+							state.uncertain = true
+							headerBraces++
+							break
+						}
+						if ambiguousType {
 							return result
 						}
 					}
@@ -205,6 +208,7 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 						return sourceBodyRange{}
 					}
 					result.endLine = number
+					result.enclosed = true
 					result.complete = state.quote == "" && !state.blockComment && !state.uncertain
 					return result
 				}
@@ -242,11 +246,13 @@ func pythonBody(file retrievalFile, startLine int) sourceBodyRange {
 		continuation := state.quote != "" || depth > 0 || continued
 		line := file.lines[number-1]
 		code := bodyCodeLine(line, ".py", &state)
-		if state.uncertain {
+		if state.uncertain && state.quote != "" {
+			result.endLine = number
 			return result
 		}
 		if headerEnded && !continuation && strings.TrimSpace(code) != "" && pythonIndent(line) <= indent {
 			result.endLine = number - 1
+			result.enclosed = true
 			result.complete = sawBody && state.quote == "" && !state.uncertain
 			return result
 		}
@@ -274,7 +280,8 @@ func pythonBody(file retrievalFile, startLine int) sourceBodyRange {
 			}
 		}
 	}
-	result.complete = result.endLine == len(file.lines) && headerEnded && sawBody && depth == 0 && state.quote == "" && !state.uncertain && !continued
+	result.enclosed = result.endLine == len(file.lines) && headerEnded && sawBody && depth == 0 && !continued
+	result.complete = result.enclosed && state.quote == "" && !state.uncertain
 	return result
 }
 
@@ -310,7 +317,7 @@ func prepareEvidenceWindow(file retrievalFile, window retrievalWindow, kind stri
 	}
 	for start := anchor; start >= maxInt(1, anchor-maxExcerptLines+1); start-- {
 		body := sourceBody(file, start)
-		if body.found && (kind != "caller" || body.endLine >= last) {
+		if body.found && (kind != "caller" || body.enclosed && body.endLine >= last) {
 			begin, end := minInt(body.startLine, first), maxInt(body.endLine, last)
 			if end-begin+1 <= maxExcerptLines {
 				window.startLine, window.endLine = begin, end
