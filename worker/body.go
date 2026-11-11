@@ -150,6 +150,9 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 	parametersEnd := 0
 	for number := startLine; number <= result.endLine; number++ {
 		code := bodyCodeLine(file.lines[number-1], extension, &state)
+		if state.uncertain {
+			return result
+		}
 		for _, character := range code {
 			if bodyBraces > 0 {
 				if character == '{' {
@@ -187,12 +190,7 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 					if javascriptPath(extension) {
 						ambiguousType := parametersEnd > 0 && strings.Contains(header.String()[parametersEnd:], ":") || strings.Count(prefix, "<") > strings.Count(prefix, ">")
 						ambiguousArrow := strings.Count(prefix, "=>") > 1 || strings.Contains(prefix, "=>") && (!arrowBodyPrefix.MatchString(prefix) || !strings.HasSuffix(strings.TrimSpace(prefix), "=>"))
-						if ambiguousArrow {
-							state.uncertain = true
-							headerBraces++
-							break
-						}
-						if ambiguousType {
+						if ambiguousArrow || ambiguousType {
 							return result
 						}
 					}
@@ -246,8 +244,7 @@ func pythonBody(file retrievalFile, startLine int) sourceBodyRange {
 		continuation := state.quote != "" || depth > 0 || continued
 		line := file.lines[number-1]
 		code := bodyCodeLine(line, ".py", &state)
-		if state.uncertain && state.quote != "" {
-			result.endLine = number
+		if state.uncertain {
 			return result
 		}
 		if headerEnded && !continuation && strings.TrimSpace(code) != "" && pythonIndent(line) <= indent {
