@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1409,10 +1410,11 @@ func classifyMatch(path, line, query string) []matchCategory {
 	if isImportLine(line) {
 		categories = append(categories, matchCategory{kind: "import", confidence: "candidate", reason: "import/include/use/require line"})
 	}
-	if isDefinitionLine(line, query) {
+	definition := isDefinitionLine(path, line, query)
+	if definition {
 		categories = append(categories, matchCategory{kind: "definition", confidence: "candidate", reason: "declaration-like definition"})
 	}
-	if isCallLine(line, query) && !isDefinitionLine(line, query) {
+	if isCallLine(line, query) && !definition {
 		categories = append(categories, matchCategory{kind: "caller", confidence: "candidate", reason: "call shape"})
 	}
 	return categories
@@ -1424,6 +1426,9 @@ func isTestPath(path string) bool {
 	return strings.Contains(lower, "/test/") || strings.HasPrefix(lower, "test/") ||
 		strings.Contains(lower, "/tests/") || strings.HasPrefix(lower, "tests/") ||
 		strings.Contains("/"+lower, "/__tests__/") ||
+		strings.Contains("/"+lower, "/feature_tests/") ||
+		strings.Contains("/"+lower, "/integration-tests/") ||
+		strings.Contains("/"+lower, "/integration_tests/") ||
 		strings.HasSuffix(lower, "_test.go") || strings.Contains(lower, ".test.") || strings.Contains(lower, ".spec.") ||
 		(strings.HasSuffix(name, ".py") && (strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_test.py")))
 }
@@ -1448,10 +1453,26 @@ func isImportLine(line string) bool {
 	return false
 }
 
-func isDefinitionLine(line, query string) bool {
+var memberDefinitionPatterns = map[string]*regexp.Regexp{
+	".ts":   regexp.MustCompile(`^(?:(?:public|private|protected|static|async|abstract|override|readonly|get|set)\s+)*([a-z_$][\w$]*)\s*(?:<[^{};]*>)?\([^;{}]*\)\s*(?::[^;{}=]+)?\s*\{`),
+	".go":   regexp.MustCompile(`^func\s+\([^)]*\)\s+(\w+)\s*\(`),
+	".py":   regexp.MustCompile(`^([a-z_]\w*)\s*:\s*[a-z_\[]`),
+	".java": regexp.MustCompile(`^(?:(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:[\w.$]+(?:<[^;{}]+>)?(?:\[\])?\s+)+([a-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[\w.,\s]+)?\s*\{`),
+}
+
+func isDefinitionLine(path, line, query string) bool {
 	lowerLine := strings.ToLower(line)
 	lowerQuery := strings.ToLower(query)
 	trimmed := strings.TrimSpace(lowerLine)
+	extension := strings.ToLower(filepath.Ext(path))
+	if extension == ".tsx" || extension == ".js" || extension == ".jsx" {
+		extension = ".ts"
+	}
+	if pattern := memberDefinitionPatterns[extension]; pattern != nil {
+		if match := pattern.FindStringSubmatch(trimmed); len(match) > 1 && match[1] == lowerQuery {
+			return true
+		}
+	}
 	for _, keyword := range []string{"func ", "function ", "class ", "interface ", "struct ", "type ", "const ", "let ", "var ", "def ", "fn ", "export function ", "export class "} {
 		if strings.Contains(trimmed, keyword+lowerQuery) {
 			return true

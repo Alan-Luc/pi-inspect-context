@@ -23,6 +23,11 @@ func TestTestPathClassification(t *testing.T) {
 		{"src/feature_test.go", true},
 		{"src/feature.test.ts", true},
 		{"src/feature.spec.ts", true},
+		{"feature_tests/scenario.py", true},
+		{"src/feature_tests/scenario.py", true},
+		{"integration-tests/account.ts", true},
+		{"src/integration-tests/account.ts", true},
+		{"src/integration_tests/scenario.py", true},
 		{"src/feature.py", false},
 		{"src/test_feature.ts", false},
 		{"src/test_feature.py.txt", false},
@@ -32,6 +37,8 @@ func TestTestPathClassification(t *testing.T) {
 		{"src/my__tests__/feature.py", false},
 		{"src/feature_tests.py", false},
 		{"src/latest_feature.py", false},
+		{"src/feature_tests_helpers/scenario.py", false},
+		{"src/integration-tests-helper/account.ts", false},
 	} {
 		t.Run(test.path, func(t *testing.T) {
 			if got := isTestPath(test.path); got != test.want {
@@ -67,6 +74,8 @@ func TestWorkerTestPathClassification(t *testing.T) {
 				"src/test_feature.py",
 				"src/feature_test.py",
 				"integration_tests/test_feature.py",
+				"feature_tests/scenario.py",
+				"src/integration-tests/scenario.ts",
 			}
 			for _, path := range testPaths {
 				writeWorkerFile(t, root, path, "from feature import needle\nneedle()\n")
