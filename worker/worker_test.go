@@ -729,7 +729,7 @@ func TestWorkerDetectsMutationBeforePacket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scan, err := scanInventory(repository, "needle", before)
+	scan, err := scanInventory(repository, "needle", before, ".")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -118,7 +118,11 @@ func runProcess(input io.Reader, output io.Writer, manifestPath string) (runErr 
 	if err != nil {
 		return withWorkerCode("inventory", err)
 	}
-	result, err := scanInventory(repository, request.Query, initial)
+	scope, err := nearestPackageScope(repository, request.Cwd, initial)
+	if err != nil {
+		return withWorkerCode("root", err)
+	}
+	result, err := scanInventory(repository, request.Query, initial, scope)
 	if err != nil {
 		return withWorkerCode("scan", err)
 	}
@@ -504,7 +508,7 @@ func appendAdmittedFile(repository *openedRepository, entry inventoryEntry, resu
 	return nil
 }
 
-func scanInventory(repository *openedRepository, query string, inventory repositoryInventory) (scanResult, error) {
+func scanInventory(repository *openedRepository, query string, inventory repositoryInventory, scope string) (scanResult, error) {
 	result := scanResult{
 		store:     newEvidenceStore(),
 		omissions: newOmissionAccumulator(),
@@ -534,6 +538,11 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 			}
 		}
 		sort.Slice(worktree, func(left, right int) bool {
+			leftLocal := inPackageScope(worktree[left].path, scope)
+			rightLocal := inPackageScope(worktree[right].path, scope)
+			if leftLocal != rightLocal {
+				return leftLocal
+			}
 			leftTerms := matchingPathTerms(strings.ToLower(worktree[left].path), terms)
 			rightTerms := matchingPathTerms(strings.ToLower(worktree[right].path), terms)
 			if (len(leftTerms) > 0) != (len(rightTerms) > 0) {
@@ -640,6 +649,9 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 			}
 		}
 		ordered := orderGitCandidates(candidates, query, terms, frequencies, len(candidates))
+		sort.SliceStable(ordered, func(left, right int) bool {
+			return inPackageScope(ordered[left].path, scope) && !inPackageScope(ordered[right].path, scope)
+		})
 		remaining := maxDiscoveredFiles - result.discoveredFiles
 		if remaining < 0 {
 			remaining = 0
@@ -672,6 +684,9 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 		} else {
 			sort.Slice(ordered, func(left, right int) bool { return ordered[left].path < ordered[right].path })
 		}
+		sort.SliceStable(ordered, func(left, right int) bool {
+			return inPackageScope(ordered[left].path, scope) && !inPackageScope(ordered[right].path, scope)
+		})
 		for index, entry := range ordered {
 			if index >= maxDiscoveredFiles {
 				result.omissions.add("file_limit", entry.path)
@@ -683,6 +698,7 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 		}
 	}
 
+	files = scopeRetrievalFiles(files, terms, scope, &result)
 	collection := collectRetrievalCandidates(files, query, terms)
 	windows := buildRetrievalWindows(files, collection.candidates)
 	primaryWindows := selectRetrievalWindows(promoteReadingPriority(windows, files, terms), terms)
@@ -1665,7 +1681,7 @@ func makePacket(request workerRequest, inventory repositoryInventory, scan scanR
 		packet = retainReferences(packet)
 		addPacketOmission(&packet, "excerpt_limit", pruned)
 	}
-	packetID := hashID(inventory.fingerprint + "\x00" + request.Query)
+	packetID := hashID(inventory.fingerprint + "\x00" + request.Query + "\x00" + request.Cwd)
 	packet.Receipt = receipt{PacketID: packetID, SchemaVersion: 1, PolicyVersion: policyVersion, SnapshotID: inventory.fingerprint, DurationMS: time.Since(started).Milliseconds(), DiscoveredFiles: scan.discoveredFiles, ReadFiles: scan.readFiles, BytesRead: scan.bytesRead, ExcerptCount: len(packet.Excerpts)}
 	packet = fitPacket(packet)
 	packet.Receipt.ExcerptCount = len(packet.Excerpts)

@@ -34,6 +34,7 @@ const POSIX_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 export type InspectionTarget = {
 	root: string;
 	query: string;
+	cwd?: string;
 };
 
 export type WorkerRunOptions = {
@@ -531,7 +532,7 @@ export async function runWorker(target: InspectionTarget, options: WorkerRunOpti
 		if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink() || (manifestMetadata.mode & 0o077) !== 0) {
 			fail("authorization", "authorization manifest must be a mode-0600 regular file");
 		}
-		const request: WorkerRequest = { version: WORKER_PROTOCOL_VERSION, root, query };
+		const request: WorkerRequest = { version: WORKER_PROTOCOL_VERSION, root, query, ...(target.cwd === undefined ? {} : { cwd: target.cwd }) };
 		if (!Value.Check(WORKER_REQUEST_SCHEMA, request)) fail("request_limit", "generated worker request failed its schema");
 		const input = JSON.stringify(request);
 		if (Buffer.byteLength(input, "utf8") > MAX_REQUEST_BYTES) fail("request_limit", `worker request exceeds ${MAX_REQUEST_BYTES} bytes`);
@@ -568,7 +569,8 @@ export async function inspectContext(
 ): Promise<ResearchPacketV1> {
 	const query = normalizeQuery(params);
 	const root = await resolveInspectionRoot(ctx.cwd, options.signal);
-	return runWorker({ root, query }, options);
+	const cwd = relative(root, validateDirectory(ctx.cwd, "ctx.cwd")).split(sep).join("/") || ".";
+	return runWorker({ root, query, cwd }, options);
 }
 
 export function createInspectContextTool(options: InspectContextToolOptions = {}) {

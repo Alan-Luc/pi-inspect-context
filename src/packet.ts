@@ -1,6 +1,6 @@
 import { Type, type Static } from "typebox";
 
-export const POLICY_VERSION = "inspect-context-mini-v8" as const;
+export const POLICY_VERSION = "inspect-context-mini-v9" as const;
 export const WORKER_PROTOCOL_VERSION = 1 as const;
 export const MAX_QUERY_BYTES = 4_096;
 export const MAX_DISCOVERED_FILES = 2_000;
@@ -27,6 +27,7 @@ export const OMISSION_REASONS = [
 	"invalid_utf8",
 	"oversized_file",
 	"packet_limit",
+	"package_scope",
 	"read_error",
 ] as const;
 
@@ -102,6 +103,7 @@ export const WORKER_REQUEST_SCHEMA = Type.Object(
 	{
 		version: Type.Literal(WORKER_PROTOCOL_VERSION),
 		root: Type.String({ minLength: 1 }),
+		cwd: Type.Optional(Type.String({ minLength: 1 })),
 		query: Type.String({ minLength: 1, maxLength: MAX_QUERY_BYTES }),
 	},
 	{ additionalProperties: false },

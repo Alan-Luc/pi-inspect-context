@@ -53,8 +53,8 @@ test("the registered tool executes the packaged Go worker without executing repo
 	}
 });
 
-test("the TypeScript adapter and Go worker preserve the v8 policy and v1 packet contract", async () => {
-	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v8-integration-"));
+test("the TypeScript adapter and Go worker preserve the v9 policy and v1 packet contract", async () => {
+	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v9-integration-"));
 	try {
 		await mkdir(join(root, "src"));
 		await writeFile(join(root, "src", "health.ts"), "export const statusRoute = '/health/ready';\nexport function registerStatusEndpoint() {}\n", "utf8");
@@ -73,7 +73,7 @@ test("the TypeScript adapter and Go worker preserve the v8 policy and v1 packet 
 });
 
 test("the Go worker returns a compact actionable packet for an impossible query", async () => {
-	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v8-no-match-"));
+	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v9-no-match-"));
 	try {
 		await mkdir(join(root, "src"));
 		await writeFile(join(root, "src", "health.ts"), "export const statusRoute = '/health/ready';\n", "utf8");

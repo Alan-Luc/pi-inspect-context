@@ -154,6 +154,25 @@ test("resolves Git roots and authorizes the cwd itself outside Git", async () =>
 	}
 });
 
+test("passes only the authorized root-relative cwd to the worker", async () => {
+	const directory = await makeDirectory("pi-inspect-context-cwd-request-");
+	const repository = await makeRepository();
+	const probe = join(directory.root, "request.json");
+	try {
+		const worker = await makeWorker(directory.root, packetWorkerSource(packet(), `
+fs.writeFileSync(${JSON.stringify(probe)}, JSON.stringify(request));
+`));
+		await inspectContext({ cwd: repository.nested }, { query: "needle" }, { workerPath: worker });
+		const request = JSON.parse(await readFile(probe, "utf8"));
+		assert.equal(request.root, repository.root);
+		assert.equal(request.cwd, "src/nested");
+		assert.deepEqual(Object.keys(request).sort(), ["cwd", "query", "root", "version"]);
+	} finally {
+		await directory.cleanup();
+		await repository.cleanup();
+	}
+});
+
 test("rejects a symlink cwd before worker execution", async () => {
 	const directory = await makeDirectory("pi-inspect-context-symlink-");
 	const target = join(directory.root, "target");
@@ -190,14 +209,15 @@ fs.writeFileSync(${JSON.stringify(probe)}, JSON.stringify({
 		const result = await inspectContext({ cwd: workspace.root }, { query: "e\u0301" }, { workerPath: worker });
 		assert.equal(result.target.query, "é");
 		const details = JSON.parse(await readFile(probe, "utf8")) as {
-			request: { version: number; root: string; query: string };
+			request: { version: number; root: string; cwd: string; query: string };
 			manifest: { version: number; root: string };
 			manifestKeys: string[];
 			manifestMode: number;
 			runRoot: string;
 			leaked: string | null;
 		};
-		assert.deepEqual(Object.keys(details.request).sort(), ["query", "root", "version"]);
+		assert.deepEqual(Object.keys(details.request).sort(), ["cwd", "query", "root", "version"]);
+		assert.equal(details.request.cwd, ".");
 		assert.deepEqual(details.manifestKeys, ["root", "version"]);
 		assert.equal(details.manifestMode, 0o600);
 		assert.equal(details.request.root, workspace.root);

@@ -14,7 +14,7 @@ import (
 
 const (
 	protocolVersion             = 1
-	policyVersion               = "inspect-context-mini-v8"
+	policyVersion               = "inspect-context-mini-v9"
 	maxQueryBytes               = 4_096
 	maxPacketBytes              = 49_152
 	targetPacketBytes           = 32_768
@@ -32,6 +32,7 @@ const (
 type workerRequest struct {
 	Version int    `json:"version"`
 	Root    string `json:"root"`
+	Cwd     string `json:"cwd,omitempty"`
 	Query   string `json:"query"`
 }
 
@@ -117,6 +118,7 @@ var omissionReasons = map[string]struct{}{
 	"invalid_utf8":         {},
 	"oversized_file":       {},
 	"packet_limit":         {},
+	"package_scope":        {},
 	"read_error":           {},
 }
 
@@ -152,6 +154,9 @@ func validateRequest(request workerRequest) error {
 	}
 	if err := validateRoot(request.Root); err != nil {
 		return err
+	}
+	if request.Cwd != "" && request.Cwd != "." && !safeRepositoryPath(request.Cwd) {
+		return errors.New("cwd must be a safe root-relative directory")
 	}
 	return validateQuery(request.Query)
 }
