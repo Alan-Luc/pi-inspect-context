@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { labelAccuracy, recallAt5, rankedExcerptPaths, measureBytes } from "../bench/metrics.mjs";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
@@ -84,6 +87,43 @@ test("public labels point to actual matching lines in all three fixture corpora"
 			const lines = (await readFile(path, "utf8")).split("\n");
 			assert.ok(lines[fact.line - 1]?.includes(fixture.query), `${fixture.id}: ${fact.path}:${fact.line}`);
 		}
+	}
+});
+
+test("CLI retains failed samples and exits nonzero without treating failures as cheap success", async () => {
+	const scratch = await mkdtemp(join(tmpdir(), "benchmark-failures-"));
+	try {
+		const root = join(scratch, "repository");
+		const adapterRoot = join(scratch, "adapter");
+		await mkdir(root);
+		await mkdir(join(adapterRoot, "src"), {recursive:true});
+		await writeFile(join(adapterRoot, "src/adapter.ts"), `export function createInspectContextTool() {
+			let calls = 0;
+			return {execute: async (_id, params) => {
+				calls++;
+				if (params.query === "alwaysFail" || calls === 1 || calls % 2 === 0) throw new Error("planned failure");
+				return {details:{excerpts:[{path:"source.ts",startLine:1,endLine:1,kind:"definition"}]},content:[{type:"text",text:"ok"}]};
+			}};
+		}`);
+		const config = join(scratch, "config.json");
+		await writeFile(config, JSON.stringify({cases:["symbol","alwaysFail"].map((query) => ({id:query,root,cwd:".",query,expected:[{path:"source.ts",line:1,kind:"definition"}]}))}));
+		const output = join(scratch, "report.json");
+		const cli = fileURLToPath(new URL("../bench/inspect-context.mjs", import.meta.url));
+		const result = spawnSync(process.execPath, ["--experimental-strip-types",cli,"--adapter-root",adapterRoot,"--config",config,"--samples","10","--output",output], {encoding:"utf8"});
+		assert.equal(result.status, 1, result.stderr);
+		assert.equal(existsSync(output), true, "failed calls must remain measurable");
+		const report = JSON.parse(await readFile(output,"utf8"));
+		assert.equal(report.cases[0].warmupError, "planned failure");
+		assert.equal(report.cases[0].failureCount, 5);
+		assert.equal(report.cases[0].recallAt5, 0.5);
+		assert.equal(report.cases[0].labelAccuracy, 0.5);
+		assert.equal(report.cases[1].failureCount, 10);
+		assert.equal(report.cases[1].contentBytes, null);
+		assert.equal(report.cases[1].packetBytes, null);
+		assert.equal(report.summary.failureCount, 17);
+		assert.equal(report.summary.contentBytes, null);
+	} finally {
+		await rm(scratch,{recursive:true,force:true});
 	}
 });
 

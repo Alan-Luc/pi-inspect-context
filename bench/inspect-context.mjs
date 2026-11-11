@@ -74,31 +74,56 @@ export async function runBenchmark(settings) {
 			if (relativeCwd === ".." || relativeCwd.startsWith(`..${sep}`) || isAbsolute(relativeCwd)) {
 				throw new Error("case cwd must remain inside its root");
 			}
-			await tool.execute("benchmark-warmup", { query: benchmarkCase.query }, undefined, undefined, { cwd });
+			let warmupError = null;
+			try {
+				await tool.execute("benchmark-warmup", { query: benchmarkCase.query }, undefined, undefined, { cwd });
+			} catch (error) {
+				warmupError = error instanceof Error ? error.message : String(error);
+			}
 			const elapsed = [];
-			let result;
+			const errors = new Set();
+			const expectedPaths = [...new Set(benchmarkCase.expected.map(({ path }) => path))];
+			let failureCount = 0;
+			let pathRecall = 0;
+			let correctLabels = 0;
+			let bytes = { packetBytes: null, contentBytes: null, contentTokens: null };
 			for (let sample = 0; sample < settings.samples; sample++) {
 				const started = performance.now();
-				result = await tool.execute("benchmark-sample", { query: benchmarkCase.query }, undefined, undefined, { cwd });
+				let outcome;
+				try {
+					outcome = { result: await tool.execute("benchmark-sample", { query: benchmarkCase.query }, undefined, undefined, { cwd }) };
+				} catch (error) {
+					outcome = { error: error instanceof Error ? error.message : String(error) };
+				}
 				elapsed.push(performance.now() - started);
+				if ("error" in outcome) {
+					failureCount++;
+					errors.add(outcome.error);
+					continue;
+				}
+				const { result } = outcome;
+				const packet = result.details;
+				pathRecall += recallAt5(packet, expectedPaths);
+				correctLabels += labelAccuracy(packet, benchmarkCase.expected);
+				bytes = measureBytes(packet, result.content.filter((block) => block.type === "text").map((block) => block.text).join(""));
 			}
 			elapsedAll.push(...elapsed);
-			const packet = result.details;
-			const bytes = measureBytes(packet, result.content.filter((block) => block.type === "text").map((block) => block.text).join(""));
 			const contractHash = createHash("sha256").update(JSON.stringify({root: benchmarkCase.root, cwd: relativeCwd, query: benchmarkCase.query, expected: benchmarkCase.expected})).digest("hex");
-			results.push({ id: benchmarkCase.id, contractHash, recallAt5: recallAt5(packet, [...new Set(benchmarkCase.expected.map(({ path }) => path))]), labelAccuracy: labelAccuracy(packet, benchmarkCase.expected), p50Ms: percentile(elapsed, 0.5), p95Ms: percentile(elapsed, 0.95), ...bytes });
+			results.push({ id: benchmarkCase.id, contractHash, warmupError, failureCount, errors: [...errors], recallAt5: pathRecall / settings.samples, labelAccuracy: correctLabels / settings.samples, p50Ms: percentile(elapsed, 0.5), p95Ms: percentile(elapsed, 0.95), ...bytes });
 		}
 	} finally {
 		await rm(scratch, { recursive: true, force: true });
 	}
+	const meanCost = (field) => results.some((item) => item[field] === null) ? null : Math.round(results.reduce((sum, item) => sum + item[field], 0) / results.length);
 	return { kind: "labeled-offline-benchmark-not-agent-ab", warmupsPerCase: 1, samplesPerCase: settings.samples, cases: results, summary: {
 		caseCount: results.length,
+		failureCount: results.reduce((sum, item) => sum + item.failureCount + Number(item.warmupError !== null), 0),
 		recallAt5: results.reduce((sum, item) => sum + item.recallAt5, 0) / results.length,
 		labelAccuracy: results.reduce((sum, item) => sum + item.labelAccuracy, 0) / results.length,
 		p50Ms: percentile(elapsedAll, 0.5), p95Ms: percentile(elapsedAll, 0.95),
-		packetBytes: Math.round(results.reduce((sum, item) => sum + item.packetBytes, 0) / results.length),
-		contentBytes: Math.round(results.reduce((sum, item) => sum + item.contentBytes, 0) / results.length),
-		contentTokens: Math.round(results.reduce((sum, item) => sum + item.contentTokens, 0) / results.length),
+		packetBytes: meanCost("packetBytes"),
+		contentBytes: meanCost("contentBytes"),
+		contentTokens: meanCost("contentTokens"),
 	} };
 }
 
@@ -109,6 +134,7 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
 		const serialized = `${JSON.stringify(report, null, 2)}\n`;
 		if (settings.output) await (await import("node:fs/promises")).writeFile(settings.output, serialized, { flag: "w" });
 		else process.stdout.write(serialized);
+		if (report.summary.failureCount > 0) process.exitCode = 1;
 	} catch (error) {
 		process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
 		process.exitCode = 1;
