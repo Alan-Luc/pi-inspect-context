@@ -8,7 +8,7 @@ import (
 
 const maxExpandedEvidenceBodies = 3
 
-var declarationBodyPrefix = regexp.MustCompile(`^(?:(?:export|default|declare|abstract|async|public|private|protected|static|final)\s+)*(?:function|class|interface|enum|type)\s+`)
+var declarationBodyPrefix = regexp.MustCompile(`^(?:(?:export|default|declare|abstract|async|public|private|protected|static|final)\s+)*(function|class|interface|enum|type)\s+`)
 var arrowBodyPrefix = regexp.MustCompile(`^(?:export\s+)?(?:const|let|var)\s+[^=;]+\s*=\s*(?:async\s+)?(?:\([^;{}]*\)|[a-z_$][\w$]*)\s*(?::[^=;{}]+)?=>`)
 var arrowHeaderStart = regexp.MustCompile(`^(?:export\s+)?(?:const|let|var)\s+[^=;]+\s*=\s*(?:async\s*)?\([^);{}]*$`)
 
@@ -28,6 +28,9 @@ func javascriptPath(extension string) bool {
 }
 
 func bodyCodeLine(line, extension string, state *bodyLexState) string {
+	if extension != ".go" && strings.Contains(strings.TrimRight(line, "\r\n"), "\r") || javascriptPath(extension) && strings.ContainsAny(line, "\u2028\u2029") || extension == ".java" && strings.Contains(line, `\u`) {
+		state.uncertain = true
+	}
 	var code strings.Builder
 	for index := 0; index < len(line); {
 		rest := line[index:]
@@ -65,6 +68,13 @@ func bodyCodeLine(line, extension string, state *bodyLexState) string {
 		}
 		character := line[index]
 		if character == '\'' || character == '"' || character == '`' {
+			// shortcut: Python f-strings stay partial, add tokenization when their complete bodies are needed.
+			if extension == ".py" && index > 0 {
+				prefix := strings.ToLower(line[maxInt(0, index-2):index])
+				if strings.HasSuffix(prefix, "f") || strings.HasSuffix(prefix, "fr") {
+					state.uncertain = true
+				}
+			}
 			state.quote = string(character)
 			if (extension == ".py" || extension == ".java") && strings.HasPrefix(rest, strings.Repeat(state.quote, 3)) {
 				state.quote = strings.Repeat(state.quote, 3)
@@ -73,11 +83,14 @@ func bodyCodeLine(line, extension string, state *bodyLexState) string {
 			index += len(state.quote)
 			continue
 		}
-		if javascriptPath(extension) && character == '/' {
+		if javascriptPath(extension) && (character == '/' || character == '<' || character == '>' && (index == 0 || line[index-1] != '=')) {
 			state.uncertain = true
 		}
 		code.WriteByte(character)
 		index++
+	}
+	if javascriptPath(extension) && (state.quote == "'" || state.quote == "\"") {
+		state.uncertain = true
 	}
 	return code.String()
 }
@@ -91,12 +104,28 @@ func bodyHeader(line, extension string) bool {
 		return strings.HasPrefix(trimmed, "func ") || strings.HasPrefix(trimmed, "type ")
 	}
 	if javascriptPath(extension) {
-		return declarationBodyPrefix.MatchString(trimmed) || arrowBodyPrefix.MatchString(trimmed) || arrowHeaderStart.MatchString(trimmed) || memberDefinitionPatterns[".ts"].MatchString(trimmed)
+		if declarationBodyPrefix.MatchString(trimmed) || arrowBodyPrefix.MatchString(trimmed) || arrowHeaderStart.MatchString(trimmed) {
+			return true
+		}
+		extension = ".ts"
+	} else if extension == ".java" {
+		if declarationBodyPrefix.MatchString(trimmed) {
+			return true
+		}
+	} else {
+		return false
 	}
-	if extension == ".java" {
-		return declarationBodyPrefix.MatchString(trimmed) || memberDefinitionPatterns[".java"].MatchString(trimmed)
+	match := memberDefinitionPatterns[extension].FindStringSubmatch(trimmed)
+	if len(match) < 2 {
+		return false
 	}
-	return false
+	for _, word := range []string{strings.Fields(trimmed)[0], match[1]} {
+		switch word {
+		case "if", "for", "while", "switch", "catch", "with", "else", "do", "new", "return", "throw", "yield", "assert":
+			return false
+		}
+	}
+	return true
 }
 
 func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
@@ -108,9 +137,17 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 		return pythonBody(file, startLine)
 	}
 	result := sourceBodyRange{startLine: startLine, endLine: minInt(len(file.lines), startLine+maxExcerptLines-1), found: true}
+	if javascriptPath(extension) {
+		// shortcut: non-callable declarations stay partial, add syntax parsing when their complete bodies are needed.
+		declaration := declarationBodyPrefix.FindStringSubmatch(strings.ToLower(strings.TrimSpace(file.lines[startLine-1])))
+		if len(declaration) > 1 && declaration[1] != "function" {
+			return result
+		}
+	}
 	state := bodyLexState{}
 	var header strings.Builder
 	round, square, headerBraces, bodyBraces := 0, 0, 0, 0
+	parametersEnd := 0
 	for number := startLine; number <= result.endLine; number++ {
 		code := bodyCodeLine(file.lines[number-1], extension, &state)
 		for _, character := range code {
@@ -135,6 +172,9 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 				round++
 			case ')':
 				round--
+				if javascriptPath(extension) && round == 0 && parametersEnd == 0 {
+					parametersEnd = header.Len() + 1
+				}
 			case '[':
 				square++
 			case ']':
@@ -143,8 +183,15 @@ func sourceBody(file retrievalFile, startLine int) sourceBodyRange {
 				if round == 0 && square == 0 && headerBraces == 0 && bodyHeader(header.String()+"{", extension) {
 					prefix := strings.ToLower(header.String())
 					returns := prefix[strings.LastIndex(prefix, ")")+1:]
-					if extension == ".go" && strings.HasPrefix(strings.TrimSpace(prefix), "func ") && (strings.Contains(returns, "struct") || strings.Contains(returns, "interface")) || javascriptPath(extension) && strings.HasSuffix(strings.TrimSpace(prefix), ":") {
+					if extension == ".go" && strings.HasPrefix(strings.TrimSpace(prefix), "func ") && (strings.Contains(returns, "struct") || strings.Contains(returns, "interface")) {
 						return result
+					}
+					if javascriptPath(extension) {
+						ambiguousType := parametersEnd > 0 && strings.Contains(header.String()[parametersEnd:], ":") || strings.Count(prefix, "<") > strings.Count(prefix, ">")
+						ambiguousArrow := strings.Contains(prefix, "=>") && (!arrowBodyPrefix.MatchString(prefix) || !strings.HasSuffix(strings.TrimSpace(prefix), "=>"))
+						if ambiguousType || ambiguousArrow {
+							return result
+						}
 					}
 					bodyBraces = 1
 				} else {
@@ -195,6 +242,9 @@ func pythonBody(file retrievalFile, startLine int) sourceBodyRange {
 		continuation := state.quote != "" || depth > 0 || continued
 		line := file.lines[number-1]
 		code := bodyCodeLine(line, ".py", &state)
+		if state.uncertain {
+			return result
+		}
 		if headerEnded && !continuation && strings.TrimSpace(code) != "" && pythonIndent(line) <= indent {
 			result.endLine = number - 1
 			result.complete = sawBody && state.quote == "" && !state.uncertain
