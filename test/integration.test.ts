@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -67,6 +67,28 @@ test("the TypeScript adapter and Go worker preserve the v9 policy and v1 packet 
 		assert.equal(packet.target.query, "status endpoint route");
 		const excerptPaths = [...new Set(packet.excerpts.map((excerpt) => excerpt.path))];
 		assert.ok(excerptPaths.slice(0, 5).includes("src/health.ts"), excerptPaths.join(", "));
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("package diagnostics preserve the ten-percent model byte guard", async (context) => {
+	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-byte-guard-"));
+	try {
+		await cp(new URL("../bench/fixtures/typescript-methods/", import.meta.url), root, { recursive: true });
+		await execFileAsync("git", ["init", "--quiet"], { cwd: root });
+		await execFileAsync("git", ["add", "-A"], { cwd: root });
+		const tool = createInspectContextTool();
+		for (const { query, baselineBytes } of [
+			{ query: "lookupAccount", baselineBytes: 1683 },
+			{ query: "formatAccount", baselineBytes: 1375 },
+		]) {
+			await context.test(query, async () => {
+				const result = await tool.execute("byte-guard", { query }, undefined, undefined, { cwd: join(root, "apps/accounts") });
+				const bytes = Buffer.byteLength(result.content.map((block) => block.text).join(""), "utf8");
+				assert.ok(bytes <= Math.floor(baselineBytes * 1.1), `${query}: ${bytes} model bytes exceed baseline ${baselineBytes} by more than ten percent`);
+			});
+		}
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

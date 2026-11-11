@@ -709,13 +709,13 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 	if len(result.store.excerpts) == 0 {
 		result.unknowns = append(result.unknowns, "No lexical matches; retry with an exact symbol, route, config key, or path fragment.")
 	} else {
-		result.unknowns = append(result.unknowns, "Definitions, callers, and imports are lexical candidates rather than a semantic call graph.")
+		result.unknowns = append(result.unknowns, "Lexical evidence, not a call graph.")
 		if result.ambiguous {
 			result.unknowns = append(result.unknowns, "Some matches fit more than one lexical heuristic; inspect surrounding code.")
 		}
 	}
 	if result.omissions.total() > 0 {
-		result.unknowns = append(result.unknowns, "Some files or evidence were omitted by bounded scanning; zero results do not prove absence.")
+		result.unknowns = append(result.unknowns, "Omissions: zero results do not prove absence.")
 	}
 	return result, nil
 }

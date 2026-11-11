@@ -41,22 +41,31 @@ func inPackageScope(file, scope string) bool {
 	return scope == "." || strings.HasPrefix(file, scope+"/")
 }
 
+func isPackageSourcePath(file string) bool {
+	switch strings.ToLower(path.Ext(file)) {
+	case ".ts", ".tsx", ".js", ".jsx", ".go", ".py", ".java":
+		return true
+	default:
+		return false
+	}
+}
+
 func scopeRetrievalFiles(files []retrievalFile, terms []searchTerm, scope string, result *scanResult) []retrievalFile {
 	if scope == "." {
 		return files
 	}
 	matchingPaths := 0
 	for _, file := range files {
-		if inPackageScope(file.path, scope) && !isConfigurationPath(file.path) &&
+		if inPackageScope(file.path, scope) && isPackageSourcePath(file.path) &&
 			(len(matchingSearchTerms(strings.ToLower(file.text), terms)) > 0 || len(matchingPathTerms(strings.ToLower(file.path), terms)) > 0) {
 			matchingPaths++
 		}
 	}
 	if matchingPaths < minimumPackageSourcePaths {
-		result.unknowns = append(result.unknowns, fmt.Sprintf("Nearest package %q has fewer than three matching source paths; repository-wide fallback applied.", scope))
+		result.unknowns = append(result.unknowns, fmt.Sprintf("Thin package %q: repository fallback.", scope))
 		return files
 	}
-	result.unknowns = append(result.unknowns, fmt.Sprintf("Results restricted to nearest package %q; sibling package evidence is omitted.", scope))
+	result.unknowns = append(result.unknowns, fmt.Sprintf("Package %q; sibling evidence omitted.", scope))
 	scoped := make([]retrievalFile, 0, len(files))
 	for _, file := range files {
 		directory := path.Dir(file.path)
