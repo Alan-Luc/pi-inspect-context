@@ -373,9 +373,10 @@ type repositoryInventory struct {
 }
 
 type inventoryEntry struct {
-	path     string
-	info     os.FileInfo
-	excluded string
+	path         string
+	info         os.FileInfo
+	excluded     string
+	skipWorktree bool
 }
 
 func collectInventory(repository *openedRepository) (repositoryInventory, error) {
@@ -410,7 +411,7 @@ func detectRepository(repository *openedRepository) (string, *string, error) {
 	if marker.Mode()&os.ModeSymlink != 0 {
 		return "", nil, errors.New("Git marker is a symlink")
 	}
-	result, err := runGitMetadata(repository, []string{"rev-parse", "--show-toplevel"}, 4096)
+	result, err := runGit(repository, []string{"rev-parse", "--show-toplevel"}, 4096)
 	if err != nil {
 		return "", nil, fmt.Errorf("Git rev-parse show-toplevel: %w", err)
 	}
@@ -431,7 +432,7 @@ func detectRepository(repository *openedRepository) (string, *string, error) {
 	if canonical != repository.path {
 		return "", nil, fmt.Errorf("Git top-level %q does not match authorized root %q", canonical, repository.path)
 	}
-	revisionResult, err := runGitMetadata(repository, []string{"rev-parse", "--verify", "--quiet", "HEAD"}, 4096)
+	revisionResult, err := runGit(repository, []string{"rev-parse", "--verify", "--quiet", "HEAD"}, 4096)
 	if err != nil {
 		return "", nil, fmt.Errorf("Git rev-parse HEAD: %w", err)
 	}
@@ -1524,9 +1525,8 @@ func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, con
 	return true
 }
 
-func (s *evidenceStore) packetCategories() ([][]evidenceRef, int) {
+func (s *evidenceStore) packetCategories() [][]evidenceRef {
 	values := make([][]evidenceRef, 7)
-	pruned := 0
 	for index, kind := range []string{"governing", "definition", "caller", "import", "test", "configuration", "match"} {
 		values[index] = append([]evidenceRef(nil), s.categories[kind]...)
 		if values[index] == nil {
@@ -1546,12 +1546,8 @@ func (s *evidenceStore) packetCategories() ([][]evidenceRef, int) {
 			}
 			return left.ExcerptID < right.ExcerptID
 		})
-		if len(values[index]) > maxEvidencePerCategory {
-			pruned += len(values[index]) - maxEvidencePerCategory
-			values[index] = values[index][:maxEvidencePerCategory]
-		}
 	}
-	return values, pruned
+	return values
 }
 
 type omissionAccumulator struct {
@@ -1620,7 +1616,7 @@ func containsString(values []string, wanted string) bool {
 }
 
 func makePacket(request workerRequest, inventory repositoryInventory, scan scanResult, started time.Time) (researchPacket, error) {
-	categories, categoryPruned := scan.store.packetCategories()
+	categories := scan.store.packetCategories()
 	packet := researchPacket{
 		Version:            1,
 		Target:             packetTarget{Query: request.Query, Root: ".", Repository: inventory.kind},
@@ -1637,7 +1633,6 @@ func makePacket(request workerRequest, inventory repositoryInventory, scan scanR
 	}
 	packet.Excerpts = sortExcerptsWithRanks(packet.Excerpts, scan.store.excerptRanks)
 	packet = retainReferences(packet)
-	addPacketOmission(&packet, "excerpt_limit", categoryPruned)
 	if len(packet.Excerpts) > maxExcerpts {
 		pruned := len(packet.Excerpts) - maxExcerpts
 		packet.Excerpts = packet.Excerpts[:maxExcerpts]
@@ -1847,15 +1842,7 @@ func runGit(repository *openedRepository, args []string, outputLimit int) (comma
 	return runGitInput(repository, args, "", outputLimit)
 }
 
-func runGitMetadata(repository *openedRepository, args []string, outputLimit int) (commandResult, error) {
-	return runGitCommand(repository, args, "", outputLimit)
-}
-
 func runGitInput(repository *openedRepository, args []string, input string, outputLimit int) (commandResult, error) {
-	return runGitCommand(repository, args, input, outputLimit)
-}
-
-func runGitCommand(repository *openedRepository, args []string, input string, outputLimit int) (commandResult, error) {
 	args = append([]string{"-c", "core.fsmonitor=false"}, args...)
 	command := exec.Command("git", args...)
 	command.Env = gitEnvironment()

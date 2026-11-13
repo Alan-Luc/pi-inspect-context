@@ -785,7 +785,7 @@ record "$@"
 case "$*" in
 "rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
 "rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z") printf 'src/config.go\0';;
+"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z") printf 'H src/config.go\0';;
 "-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
 "-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
   IFS= read -r term || exit 91
@@ -820,7 +820,7 @@ esac
 		value string
 		count int
 	}{
-		{name: "inventory", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fls-files\x1f--cached\x1f--others\x1f--exclude-standard\x1f-z\n", count: 2},
+		{name: "inventory", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fls-files\x1f-t\x1f--cached\x1f--others\x1f--exclude-standard\x1f-z\n", count: 2},
 		{name: "status", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fstatus\x1f--porcelain=v2\x1f-z\x1f--untracked-files=all\x1f--no-renames\n", count: 2},
 		{name: "grep", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fgrep\x1f--cached\x1f-F\x1f-i\x1f-I\x1f-l\x1f-z\x1f-f\x1f-\x1f--\n", count: 1},
 	} {
@@ -873,7 +873,7 @@ func TestWorkerGitGrepExitAndOverflowFailures(t *testing.T) {
 case "$*" in
 "rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
 "rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z") printf 'src/file.go\0';;
+"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z") printf 'H src/file.go\0';;
 "-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
 "-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
   printf called > %q
@@ -905,7 +905,7 @@ func TestWorkerNonASCIIQueryUsesBoundedGoPath(t *testing.T) {
 case "$*" in
 "rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
 "rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z") printf 'unicode.go\0';;
+"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z") printf 'H unicode.go\0';;
 "-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
 "-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --") printf called > %q; exit 99;;
 esac
@@ -935,10 +935,10 @@ func TestWorkerGitDiscoveryFindsLateTrackedCandidate(t *testing.T) {
 case "$*" in
 "rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
 "rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z")
+"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z")
   index=0
-  while [ "$index" -lt %d ]; do printf 'a-%%04d.txt\0' "$index"; index=$((index+1)); done
-  printf 'zzzz/LateGammaKey.go\0';;
+  while [ "$index" -lt %d ]; do printf 'H a-%%04d.txt\0' "$index"; index=$((index+1)); done
+  printf 'H zzzz/LateGammaKey.go\0';;
 "-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
 "-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --") cat >/dev/null; printf 'zzzz/LateGammaKey.go\0';;
 esac
@@ -972,9 +972,11 @@ func TestWorkerGitCleanCandidateTailIsBounded(t *testing.T) {
 case "$*" in
 "rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
 "rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files --cached --others --exclude-standard -z"|"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
+"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z"|"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
+  prefix=''
+  [ "$3" != ls-files ] || prefix='H '
   index=0
-  while [ "$index" -lt %d ]; do printf 'candidate-%%03d.go\0' "$index"; index=$((index+1)); done;;
+  while [ "$index" -lt %d ]; do printf '%%scandidate-%%03d.go\0' "$prefix" "$index"; index=$((index+1)); done;;
 "-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
 esac
 `, totalCandidates))
@@ -1521,12 +1523,16 @@ func TestWorkerRejectsUnsafeGitPaths(t *testing.T) {
 		name string
 		data []byte
 	}{
-		{name: "absolute", data: []byte("/absolute.txt\x00")},
-		{name: "traversal", data: []byte("../escape.txt\x00")},
-		{name: "nested traversal", data: []byte("dir/../escape.txt\x00")},
-		{name: "missing terminal NUL", data: []byte("safe.txt")},
-		{name: "empty record", data: []byte("safe.txt\x00\x00")},
-		{name: "unexcluded directory", data: []byte("nested/repository/\x00")},
+		{name: "absolute", data: []byte("H /absolute.txt\x00")},
+		{name: "traversal", data: []byte("H ../escape.txt\x00")},
+		{name: "nested traversal", data: []byte("H dir/../escape.txt\x00")},
+		{name: "missing terminal NUL", data: []byte("H safe.txt")},
+		{name: "empty record", data: []byte("H safe.txt\x00\x00")},
+		{name: "unexcluded directory", data: []byte("? nested/repository/\x00")},
+		{name: "missing tag", data: []byte("safe.txt\x00")},
+		{name: "unknown tag", data: []byte("X safe.txt\x00")},
+		{name: "duplicate clean path", data: []byte("H safe.txt\x00H safe.txt\x00")},
+		{name: "inconsistent tags", data: []byte("H safe.txt\x00M safe.txt\x00")},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := parseGitPaths(test.data); err == nil {
@@ -1905,7 +1911,7 @@ case "$3:$4" in
 rev-parse:--show-toplevel) printf '%s\n' "$root";;
 rev-parse:--verify) printf 'deadbeef\n';;
 ls-files:*)
-  printf 'file.txt\0'
+  printf 'H file.txt\0'
   if [ -e "$marker" ]; then
     mv "$root" "${root}.old"
     mkdir "$root"

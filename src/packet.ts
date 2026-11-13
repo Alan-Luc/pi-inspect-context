@@ -92,7 +92,7 @@ export const INSPECT_CONTEXT_PARAMETERS = Type.Object(
 		query: Type.String({
 			minLength: 1,
 			maxLength: MAX_QUERY_BYTES,
-			description: "One short symbol, route, config key, path fragment, or concept. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch.",
+			description: "One short symbol, route, config key, path fragment, or concept. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Git-index search may miss edits hidden by assume-unchanged and Unicode case variants of ASCII queries in clean tracked files.",
 		}),
 	},
 	{ additionalProperties: false },

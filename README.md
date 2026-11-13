@@ -45,7 +45,11 @@ Each call starts one isolated Go worker, returns one packet, and exits. V1 has n
 - 48 KiB compact packet
 - 2-second worker timeout
 
-For ASCII queries, Git repositories run one bounded fixed-string Git-index search per retained term (at most eight), with at most four searches concurrent, and select clean tracked candidates before direct reads. Query terms are sent through Git stdin, and Git-index scanning is bounded by process output and the worker timeout rather than included in `bytesRead`. Non-clean tracked and non-ignored untracked files are probed through the authorized repository root and count toward every direct-read limit. Queries requiring non-ASCII case folding retain the bounded Go scan.
+For ASCII queries, Git repositories run one bounded fixed-string Git-index search per retained term (at most eight), with at most four searches concurrent, and select clean tracked candidates before direct reads. Query terms are sent through Git stdin, and Git-index scanning is bounded by process output and the worker timeout rather than included in `bytesRead`. Non-clean tracked and non-ignored untracked files are probed through the authorized repository root and count toward every direct-read limit. Queries containing non-ASCII search terms retain the bounded Go scan.
+
+Git-index search may miss local edits hidden by Git's `assume-unchanged` flag. For ASCII queries, it may also miss Unicode case variants in clean tracked files, such as `kelvin` matching `Kelvin`. Use direct file reads or another search when these limits matter.
+
+Merge conflicts retain the available worktree text. Tracked files intentionally absent from a sparse checkout appear as `ineligible_file` omissions.
 
 Both Git and filesystem modes exclude fixed dependency, generated, build, cache, and agent-state directories (`.pi`, `.opencode`, and `.harness`); non-Git walks do not claim `.gitignore` parity. Snapshot mutation fails the call instead of returning mixed evidence.
 

@@ -26,35 +26,32 @@ func parseGitLine(data []byte, label string) (string, error) {
 }
 
 func collectGitInventory(repository *openedRepository, revision *string) ([]inventoryEntry, string, map[string]struct{}, error) {
-	inventoryArgs := []string{"ls-files", "--cached", "--others", "--exclude-standard", "-z"}
+	inventoryArgs := []string{"ls-files", "-t", "--cached", "--others", "--exclude-standard", "-z"}
 	inventoryResult, err := runGit(repository, inventoryArgs, maxGitOutputBytes)
 	if err != nil {
 		return nil, "", nil, err
 	}
-	if len(inventoryResult.stdout) == 0 && len(inventoryResult.stderr) == 0 && inventoryResult.code == 0 {
-		legacyResult, legacyErr := runGitMetadata(repository, inventoryArgs, maxGitOutputBytes)
-		if legacyErr != nil {
-			return nil, "", nil, legacyErr
-		}
-		if legacyResult.code != 0 || len(legacyResult.stdout) > 0 || len(legacyResult.stderr) > 0 {
-			inventoryResult = legacyResult
-		}
-	}
 	if inventoryResult.code != 0 {
 		return nil, "", nil, fmt.Errorf("git inventory failed: %s", strings.TrimSpace(string(inventoryResult.stderr)))
 	}
-	paths, err := parseGitPaths(inventoryResult.stdout)
+	entries, err := parseGitPaths(inventoryResult.stdout)
 	if err != nil {
 		return nil, "", nil, err
 	}
-	entries := make([]inventoryEntry, 0, len(paths))
-	entryIndexes := make(map[string]int, len(paths))
-	for _, path := range paths {
-		if _, exists := entryIndexes[path]; exists {
-			return nil, "", nil, fmt.Errorf("git inventory contains duplicate path %q", path)
+	entryIndexes := make(map[string]int, len(entries))
+	for index := range entries {
+		entry := &entries[index]
+		entryIndexes[entry.path] = index
+		if entry.skipWorktree && entry.excluded == "" {
+			info, err := lstatRepositoryPath(repository.root, entry.path)
+			if errors.Is(err, fs.ErrNotExist) {
+				entry.excluded = "ineligible_file"
+			} else if err != nil {
+				return nil, "", nil, err
+			} else {
+				entry.info = info
+			}
 		}
-		entryIndexes[path] = len(entries)
-		entries = append(entries, inventoryEntry{path: path, excluded: exclusionReason(path)})
 	}
 	inventoryPaths := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
@@ -146,17 +143,22 @@ func collectFilesystemInventory(repository *openedRepository) ([]inventoryEntry,
 	return entries, nil
 }
 
-func parseGitPaths(data []byte) ([]string, error) {
+func parseGitPaths(data []byte) ([]inventoryEntry, error) {
 	if len(data) == 0 {
-		return []string{}, nil
+		return []inventoryEntry{}, nil
 	}
 	if data[len(data)-1] != 0 {
 		return nil, errors.New("git inventory is not NUL terminated")
 	}
 	parts := bytes.Split(data[:len(data)-1], []byte{0})
-	paths := make([]string, 0, len(parts))
+	entries := make([]inventoryEntry, 0, len(parts))
+	seen := make(map[string]byte, len(parts))
 	for _, part := range parts {
-		value := string(part)
+		if len(part) < 3 || part[1] != ' ' || !strings.ContainsRune("HSM?", rune(part[0])) {
+			return nil, fmt.Errorf("git inventory contains malformed tagged path %q", part)
+		}
+		tag := part[0]
+		value := string(part[2:])
 		if strings.HasSuffix(value, "/") {
 			directory := strings.TrimSuffix(value, "/")
 			if len([]byte(value)) <= maxPathBytes && safeRepositoryPath(directory) && exclusionReasonForDirectory(directory) != "" {
@@ -166,9 +168,16 @@ func parseGitPaths(data []byte) ([]string, error) {
 		if !safeRepositoryPath(value) {
 			return nil, fmt.Errorf("git inventory contains unsafe path %q", value)
 		}
-		paths = append(paths, value)
+		if previous, exists := seen[value]; exists {
+			if previous == 'M' && tag == 'M' {
+				continue
+			}
+			return nil, fmt.Errorf("git inventory contains duplicate path %q", value)
+		}
+		seen[value] = tag
+		entries = append(entries, inventoryEntry{path: value, excluded: exclusionReason(value), skipWorktree: tag == 'S'})
 	}
-	return paths, nil
+	return entries, nil
 }
 
 func parseGitMatchPaths(data []byte, inventory map[string]struct{}) ([]string, error) {
