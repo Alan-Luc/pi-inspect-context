@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -117,7 +118,11 @@ func runProcess(input io.Reader, output io.Writer, manifestPath string) (runErr 
 	if err != nil {
 		return withWorkerCode("inventory", err)
 	}
-	result, err := scanInventory(repository, request.Query, initial)
+	scope, err := nearestPackageScope(repository, request.Cwd, initial)
+	if err != nil {
+		return withWorkerCode("root", err)
+	}
+	result, err := scanInventory(repository, request.Query, initial, scope)
 	if err != nil {
 		return withWorkerCode("scan", err)
 	}
@@ -504,7 +509,7 @@ func appendAdmittedFile(repository *openedRepository, entry inventoryEntry, resu
 	return nil
 }
 
-func scanInventory(repository *openedRepository, query string, inventory repositoryInventory) (scanResult, error) {
+func scanInventory(repository *openedRepository, query string, inventory repositoryInventory, scope string) (scanResult, error) {
 	result := scanResult{
 		store:     newEvidenceStore(),
 		omissions: newOmissionAccumulator(),
@@ -534,6 +539,11 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 			}
 		}
 		sort.Slice(worktree, func(left, right int) bool {
+			leftLocal := inPackageScope(worktree[left].path, scope)
+			rightLocal := inPackageScope(worktree[right].path, scope)
+			if leftLocal != rightLocal {
+				return leftLocal
+			}
 			leftTerms := matchingPathTerms(strings.ToLower(worktree[left].path), terms)
 			rightTerms := matchingPathTerms(strings.ToLower(worktree[right].path), terms)
 			if (len(leftTerms) > 0) != (len(rightTerms) > 0) {
@@ -640,6 +650,9 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 			}
 		}
 		ordered := orderGitCandidates(candidates, query, terms, frequencies, len(candidates))
+		sort.SliceStable(ordered, func(left, right int) bool {
+			return inPackageScope(ordered[left].path, scope) && !inPackageScope(ordered[right].path, scope)
+		})
 		remaining := maxDiscoveredFiles - result.discoveredFiles
 		if remaining < 0 {
 			remaining = 0
@@ -672,6 +685,9 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 		} else {
 			sort.Slice(ordered, func(left, right int) bool { return ordered[left].path < ordered[right].path })
 		}
+		sort.SliceStable(ordered, func(left, right int) bool {
+			return inPackageScope(ordered[left].path, scope) && !inPackageScope(ordered[right].path, scope)
+		})
 		for index, entry := range ordered {
 			if index >= maxDiscoveredFiles {
 				result.omissions.add("file_limit", entry.path)
@@ -683,6 +699,7 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 		}
 	}
 
+	files = scopeRetrievalFiles(files, terms, scope, &result)
 	collection := collectRetrievalCandidates(files, query, terms)
 	windows := buildRetrievalWindows(files, collection.candidates)
 	primaryWindows := selectRetrievalWindows(promoteReadingPriority(windows, files, terms), terms)
@@ -693,13 +710,13 @@ func scanInventory(repository *openedRepository, query string, inventory reposit
 	if len(result.store.excerpts) == 0 {
 		result.unknowns = append(result.unknowns, "No lexical matches; retry with an exact symbol, route, config key, or path fragment.")
 	} else {
-		result.unknowns = append(result.unknowns, "Definitions, callers, and imports are lexical candidates rather than a semantic call graph.")
+		result.unknowns = append(result.unknowns, "Lexical evidence, not a call graph.")
 		if result.ambiguous {
 			result.unknowns = append(result.unknowns, "Some matches fit more than one lexical heuristic; inspect surrounding code.")
 		}
 	}
 	if result.omissions.total() > 0 {
-		result.unknowns = append(result.unknowns, "Some files or evidence were omitted by bounded scanning; zero results do not prove absence.")
+		result.unknowns = append(result.unknowns, "Omissions: zero results do not prove absence.")
 	}
 	return result, nil
 }
@@ -1244,12 +1261,9 @@ func primaryMatchCategory(categories []matchCategory) (matchCategory, bool) {
 
 func addRetrievalEvidence(result *scanResult, files []retrievalFile, terms []searchTerm, windows []retrievalWindow) (int, int) {
 	exactRepresented, fallbackRepresented := 0, 0
+	expandedBodies := 0
 	for rank, window := range windows {
 		result.store.setRank(rank)
-		text := retrievalWindowText(files[window.fileIndex], window)
-		if text == "" {
-			continue
-		}
 		categories := make([]matchCategory, 0, 3)
 		for _, candidate := range window.candidates {
 			line := ""
@@ -1274,9 +1288,14 @@ func addRetrievalEvidence(result *scanResult, files []retrievalFile, terms []sea
 			}
 			primary = matchCategory{kind: "match", confidence: "observed", reason: reason}
 		}
-		matched := result.store.add(primary.kind, window.path, window.startLine, window.endLine, text, primary.confidence, primary.reason)
+		window = prepareEvidenceWindow(files[window.fileIndex], window, primary.kind, terms, &expandedBodies)
+		text := retrievalWindowText(files[window.fileIndex], window)
+		if text == "" {
+			continue
+		}
+		matched := result.store.add(primary.kind, window.path, window.startLine, window.endLine, text, primary.confidence, primary.reason, window.bodyComplete)
 		if !matched && primary.kind != "match" {
-			matched = result.store.add("match", window.path, window.startLine, window.endLine, text, "observed", "lexical match")
+			matched = result.store.add("match", window.path, window.startLine, window.endLine, text, "observed", "lexical match", false)
 		}
 		if matched {
 			for _, candidate := range window.candidates {
@@ -1410,10 +1429,11 @@ func classifyMatch(path, line, query string) []matchCategory {
 	if isImportLine(line) {
 		categories = append(categories, matchCategory{kind: "import", confidence: "candidate", reason: "import/include/use/require line"})
 	}
-	if isDefinitionLine(line, query) {
+	definition := isDefinitionLine(path, line, query)
+	if definition {
 		categories = append(categories, matchCategory{kind: "definition", confidence: "candidate", reason: "declaration-like definition"})
 	}
-	if isCallLine(line, query) && !isDefinitionLine(line, query) {
+	if isCallLine(line, query) && !definition {
 		categories = append(categories, matchCategory{kind: "caller", confidence: "candidate", reason: "call shape"})
 	}
 	return categories
@@ -1425,6 +1445,9 @@ func isTestPath(path string) bool {
 	return strings.Contains(lower, "/test/") || strings.HasPrefix(lower, "test/") ||
 		strings.Contains(lower, "/tests/") || strings.HasPrefix(lower, "tests/") ||
 		strings.Contains("/"+lower, "/__tests__/") ||
+		strings.Contains("/"+lower, "/feature_tests/") ||
+		strings.Contains("/"+lower, "/integration-tests/") ||
+		strings.Contains("/"+lower, "/integration_tests/") ||
 		strings.HasSuffix(lower, "_test.go") || strings.Contains(lower, ".test.") || strings.Contains(lower, ".spec.") ||
 		(strings.HasSuffix(name, ".py") && (strings.HasPrefix(name, "test_") || strings.HasSuffix(name, "_test.py")))
 }
@@ -1449,10 +1472,26 @@ func isImportLine(line string) bool {
 	return false
 }
 
-func isDefinitionLine(line, query string) bool {
+var memberDefinitionPatterns = map[string]*regexp.Regexp{
+	".ts":   regexp.MustCompile(`^(?:(?:public|private|protected|static|async|abstract|override|readonly|get|set)\s+)*([a-z_$][\w$]*)\s*(?:<[^{};]*>)?\([^;{}]*\)\s*(?::[^;{}=]+)?\s*\{`),
+	".go":   regexp.MustCompile(`^func\s+\([^)]*\)\s+(\w+)\s*\(`),
+	".py":   regexp.MustCompile(`^([a-z_]\w*)\s*:\s*[a-z_\[]`),
+	".java": regexp.MustCompile(`^(?:(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:[\w.$]+(?:<[^;{}]+>)?(?:\[\])?\s+)+([a-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:throws\s+[\w.,\s]+)?\s*\{`),
+}
+
+func isDefinitionLine(path, line, query string) bool {
 	lowerLine := strings.ToLower(line)
 	lowerQuery := strings.ToLower(query)
 	trimmed := strings.TrimSpace(lowerLine)
+	extension := strings.ToLower(filepath.Ext(path))
+	if extension == ".tsx" || extension == ".js" || extension == ".jsx" {
+		extension = ".ts"
+	}
+	if pattern := memberDefinitionPatterns[extension]; pattern != nil {
+		if match := pattern.FindStringSubmatch(trimmed); len(match) > 1 && match[1] == lowerQuery {
+			return true
+		}
+	}
 	for _, keyword := range []string{"func ", "function ", "class ", "interface ", "struct ", "type ", "const ", "let ", "var ", "def ", "fn ", "export function ", "export class "} {
 		if strings.Contains(trimmed, keyword+lowerQuery) {
 			return true
@@ -1496,7 +1535,7 @@ func (s *evidenceStore) setRank(rank int) {
 	s.rank = rank
 }
 
-func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, confidence, reason string) bool {
+func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, confidence, reason string, bodyComplete bool) bool {
 	category, ok := s.categories[kind]
 	if !ok {
 		return false
@@ -1518,7 +1557,7 @@ func (s *evidenceStore) add(kind, path string, startLine, endLine int, text, con
 	if !exists {
 		s.seen[key] = id
 		s.excerptRanks[id] = s.rank
-		s.excerpts = append(s.excerpts, excerpt{ID: id, Path: path, StartLine: startLine, EndLine: endLine, Kind: kind, Text: text})
+		s.excerpts = append(s.excerpts, excerpt{ID: id, Path: path, StartLine: startLine, EndLine: endLine, Kind: kind, Text: text, BodyComplete: bodyComplete})
 	}
 	s.referenceSeen[referenceKey] = struct{}{}
 	s.categories[kind] = append(category, reference)
@@ -1639,7 +1678,7 @@ func makePacket(request workerRequest, inventory repositoryInventory, scan scanR
 		packet = retainReferences(packet)
 		addPacketOmission(&packet, "excerpt_limit", pruned)
 	}
-	packetID := hashID(inventory.fingerprint + "\x00" + request.Query)
+	packetID := hashID(inventory.fingerprint + "\x00" + request.Query + "\x00" + request.Cwd)
 	packet.Receipt = receipt{PacketID: packetID, SchemaVersion: 1, PolicyVersion: policyVersion, SnapshotID: inventory.fingerprint, DurationMS: time.Since(started).Milliseconds(), DiscoveredFiles: scan.discoveredFiles, ReadFiles: scan.readFiles, BytesRead: scan.bytesRead, ExcerptCount: len(packet.Excerpts)}
 	packet = fitPacket(packet)
 	packet.Receipt.ExcerptCount = len(packet.Excerpts)

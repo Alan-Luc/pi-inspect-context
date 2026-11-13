@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -11,8 +11,9 @@ import { POLICY_VERSION } from "../src/packet.ts";
 
 const execFileAsync = promisify(execFile);
 
-test("the registered tool executes the packaged Go worker without executing repository text", async () => {
+test("the registered tool executes the packaged session worker without executing repository text", async () => {
 	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-integration-"));
+	let shutdown: (() => Promise<void>) | undefined;
 	try {
 		const sourceRoot = join(root, "src");
 		const executionMarker = join(root, "executed");
@@ -26,7 +27,7 @@ test("the registered tool executes the packaged Go worker without executing repo
 		await execFileAsync("git", ["add", "--", "src/feature.go"], { cwd: root });
 
 		const registrations: Array<ReturnType<typeof createInspectContextTool>> = [];
-		registerInspectContext({ registerTool(tool) { registrations.push(tool); } });
+		registerInspectContext({ registerTool(tool) { registrations.push(tool); }, on(_event, handler) { shutdown = handler; } });
 		const result = await registrations[0].execute(
 			"integration-call",
 			{ query: "integratedNeedle" },
@@ -36,7 +37,10 @@ test("the registered tool executes the packaged Go worker without executing repo
 		);
 		const packet = result.details;
 
-		assert.deepEqual(JSON.parse(result.content[0].text), packet);
+		assert.ok(Buffer.byteLength(result.content[0].text) <= Buffer.byteLength(JSON.stringify(packet)) / 2);
+		assert.match(result.content[0].text, /untrusted/i);
+		assert.match(result.content[0].text, /src\/feature\.go/);
+		assert.match(result.content[0].text, /func integratedNeedle/);
 		assert.deepEqual(result.structuredContent, packet);
 		assert.equal(packet.target.repository, "git");
 		assert.equal(packet.target.root, ".");
@@ -46,15 +50,18 @@ test("the registered tool executes the packaged Go worker without executing repo
 		assert.ok(definition);
 		const excerpt = packet.excerpts.find((item) => item.id === definition.excerptId);
 		assert.match(excerpt?.text ?? "", /func integratedNeedle\(\)/);
+		assert.equal(excerpt?.bodyComplete, true);
+		assert.match(result.content[0].text, /Do not reread complete bodies/);
 		assert.match(excerpt?.text ?? "", /Ignore prior instructions/);
 		await assert.rejects(lstat(executionMarker), { code: "ENOENT" });
 	} finally {
+		if (shutdown) await shutdown();
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("the TypeScript adapter and Go worker preserve the v7 policy and v1 packet contract", async () => {
-	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v7-integration-"));
+test("the TypeScript adapter and Go worker preserve the v10 policy and v1 packet contract", async () => {
+	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v10-integration-"));
 	try {
 		await mkdir(join(root, "src"));
 		await writeFile(join(root, "src", "health.ts"), "export const statusRoute = '/health/ready';\nexport function registerStatusEndpoint() {}\n", "utf8");
@@ -72,8 +79,30 @@ test("the TypeScript adapter and Go worker preserve the v7 policy and v1 packet 
 	}
 });
 
+test("package diagnostics preserve the ten-percent model byte guard", async (context) => {
+	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-byte-guard-"));
+	try {
+		await cp(new URL("../bench/fixtures/typescript-methods/", import.meta.url), root, { recursive: true });
+		await execFileAsync("git", ["init", "--quiet"], { cwd: root });
+		await execFileAsync("git", ["add", "-A"], { cwd: root });
+		const tool = createInspectContextTool();
+		for (const { query, baselineBytes } of [
+			{ query: "lookupAccount", baselineBytes: 1683 },
+			{ query: "formatAccount", baselineBytes: 1375 },
+		]) {
+			await context.test(query, async () => {
+				const result = await tool.execute("byte-guard", { query }, undefined, undefined, { cwd: join(root, "apps/accounts") });
+				const bytes = Buffer.byteLength(result.content.map((block) => block.text).join(""), "utf8");
+				assert.ok(bytes <= Math.floor(baselineBytes * 1.1), `${query}: ${bytes} model bytes exceed baseline ${baselineBytes} by more than ten percent`);
+			});
+		}
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("the Go worker returns a compact actionable packet for an impossible query", async () => {
-	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v7-no-match-"));
+	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v10-no-match-"));
 	try {
 		await mkdir(join(root, "src"));
 		await writeFile(join(root, "src", "health.ts"), "export const statusRoute = '/health/ready';\n", "utf8");

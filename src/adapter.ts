@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { Value } from "typebox/value";
 import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
+import { renderModelEvidence } from "./model-evidence.ts";
+import { resolveGitExecutable } from "./git-executable.ts";
 import {
 	AUTHORIZATION_MANIFEST_SCHEMA,
 	INSPECT_CONTEXT_PARAMETERS,
@@ -30,10 +32,12 @@ const MAX_GIT_BYTES = 4 * 1024;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const KILL_GRACE_MS = 250;
 const POSIX_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+let gitExecutable: string | undefined;
 
 export type InspectionTarget = {
 	root: string;
 	query: string;
+	cwd?: string;
 };
 
 export type WorkerRunOptions = {
@@ -326,13 +330,17 @@ async function runBoundedProcess(executable: string, args: readonly string[], op
 }
 
 async function runGit(cwd: string, signal?: AbortSignal): Promise<string> {
-	const result = await runBoundedProcess("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
+	const started = performance.now();
+	const executable = gitExecutable ??= resolveGitExecutable(POSIX_PATH);
+	const timeoutMs = DEFAULT_TIMEOUT_MS - Math.ceil(performance.now() - started);
+	if (timeoutMs <= 0) fail("git_resolution", `Git root resolution timed out after ${DEFAULT_TIMEOUT_MS}ms`);
+	const result = await runBoundedProcess(executable, ["-C", cwd, "rev-parse", "--show-toplevel"], {
 		cwd,
 		environment: gitEnvironment(),
 		label: "Git root resolution",
 		maxStdoutBytes: MAX_GIT_BYTES,
 		maxStderrBytes: MAX_STDERR_BYTES,
-		timeoutMs: DEFAULT_TIMEOUT_MS,
+		timeoutMs,
 		signal,
 	});
 	if (result.signal !== null || result.code !== 0) {
@@ -448,6 +456,9 @@ function validatePacketSemantics(packet: ResearchPacketV1, expectedQuery: string
 		if (excerpt.endLine < excerpt.startLine || excerpt.endLine - excerpt.startLine + 1 > MAX_EXCERPT_LINES || excerpt.text.length === 0) {
 			fail("invalid_response", `excerpts[${index}] has an invalid line range or empty text`);
 		}
+		if (excerpt.bodyComplete && excerpt.kind !== "definition" && excerpt.kind !== "caller") {
+			fail("invalid_response", `excerpts[${index}] complete body requires definition or caller kind`);
+		}
 		if (excerpts.has(excerpt.id)) fail("invalid_response", `duplicate excerpt id: ${excerpt.id}`);
 		excerpts.set(excerpt.id, excerpt);
 	}
@@ -531,7 +542,7 @@ export async function runWorker(target: InspectionTarget, options: WorkerRunOpti
 		if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink() || (manifestMetadata.mode & 0o077) !== 0) {
 			fail("authorization", "authorization manifest must be a mode-0600 regular file");
 		}
-		const request: WorkerRequest = { version: WORKER_PROTOCOL_VERSION, root, query };
+		const request: WorkerRequest = { version: WORKER_PROTOCOL_VERSION, root, query, ...(target.cwd === undefined ? {} : { cwd: target.cwd }) };
 		if (!Value.Check(WORKER_REQUEST_SCHEMA, request)) fail("request_limit", "generated worker request failed its schema");
 		const input = JSON.stringify(request);
 		if (Buffer.byteLength(input, "utf8") > MAX_REQUEST_BYTES) fail("request_limit", `worker request exceeds ${MAX_REQUEST_BYTES} bytes`);
@@ -568,14 +579,15 @@ export async function inspectContext(
 ): Promise<ResearchPacketV1> {
 	const query = normalizeQuery(params);
 	const root = await resolveInspectionRoot(ctx.cwd, options.signal);
-	return runWorker({ root, query }, options);
+	const cwd = relative(root, validateDirectory(ctx.cwd, "ctx.cwd")).split(sep).join("/") || ".";
+	return runWorker({ root, query, cwd }, options);
 }
 
 export function createInspectContextTool(options: InspectContextToolOptions = {}) {
 	return {
 		name: "inspect_context",
 		label: "Inspect context",
-		description: "Find bounded lexical repository context for one short symbol, route, config key, path fragment, or concept query. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Results are read-only discovery aids: zero, weak, or materially omitted evidence is not proof of absence; use ordinary repository investigation when needed. Git-index search may miss edits hidden by assume-unchanged and Unicode case variants of ASCII queries in clean tracked files.",
+		description: "Find bounded lexical repository context for one short symbol, route, config key, path fragment, or concept query. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Results are read-only discovery aids: zero, weak, or materially omitted evidence is not proof of absence; use ordinary repository investigation when needed. Do not reread bodyComplete=true bodies; investigate only missing context. Git-index search may miss edits hidden by assume-unchanged and Unicode case variants of ASCII queries in clean tracked files.",
 		parameters: INSPECT_CONTEXT_PARAMETERS,
 		outputSchema: RESEARCH_PACKET_V1_SCHEMA,
 		executionMode: "sequential" as const,
@@ -589,7 +601,7 @@ export function createInspectContextTool(options: InspectContextToolOptions = {}
 		) => {
 			const packet = await inspectContext(ctx, params, { ...options, signal });
 			return {
-				content: [{ type: "text" as const, text: JSON.stringify(packet) }],
+				content: [{ type: "text" as const, text: renderModelEvidence(packet) }],
 				details: packet,
 				structuredContent: packet,
 			};

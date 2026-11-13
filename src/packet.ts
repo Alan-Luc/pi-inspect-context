@@ -1,6 +1,6 @@
 import { Type, type Static } from "typebox";
 
-export const POLICY_VERSION = "inspect-context-mini-v7" as const;
+export const POLICY_VERSION = "inspect-context-mini-v10" as const;
 export const WORKER_PROTOCOL_VERSION = 1 as const;
 export const MAX_QUERY_BYTES = 4_096;
 export const MAX_DISCOVERED_FILES = 2_000;
@@ -27,6 +27,7 @@ export const OMISSION_REASONS = [
 	"invalid_utf8",
 	"oversized_file",
 	"packet_limit",
+	"package_scope",
 	"read_error",
 ] as const;
 
@@ -58,13 +59,14 @@ const ExcerptSchema = Type.Object(
 			Type.Literal("match"),
 		]),
 		text: Type.String(),
+		bodyComplete: Type.Boolean(),
 	},
 	{ additionalProperties: false },
 );
 
 const OmissionGroupSchema = Type.Object(
 	{
-		reason: Type.Union(OMISSION_REASONS.map((reason) => Type.Literal(reason))),
+		reason: Type.Enum(OMISSION_REASONS),
 		count: Type.Integer({ minimum: 0 }),
 		examples: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_OMISSION_EXAMPLES })),
 	},
@@ -102,6 +104,7 @@ export const WORKER_REQUEST_SCHEMA = Type.Object(
 	{
 		version: Type.Literal(WORKER_PROTOCOL_VERSION),
 		root: Type.String({ minLength: 1 }),
+		cwd: Type.Optional(Type.String({ minLength: 1 })),
 		query: Type.String({ minLength: 1, maxLength: MAX_QUERY_BYTES }),
 	},
 	{ additionalProperties: false },

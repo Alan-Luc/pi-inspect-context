@@ -6,12 +6,21 @@
   "keywords": ["pi-package"],
   "files": [
     "extensions/index.ts",
+    "extensions/typescript.ts",
     "src/packet.ts",
     "src/adapter.ts",
+    "src/git-executable.ts",
+    "src/model-evidence.ts",
+    "src/session-model-evidence.ts",
+    "src/worker/",
+    "dist/worker.mjs",
+    "scripts/build-typescript-worker.mjs",
     "scripts/build-worker.mjs",
     "worker/go.mod",
     "worker/contract.go",
     "worker/discovery.go",
+    "worker/body.go",
+    "worker/scope.go",
     "worker/worker.go",
     "worker/cmd/inspect-context/main.go"
   ],
@@ -26,15 +35,20 @@
     "@earendil-works/pi-coding-agent": "*",
     "typebox": "*"
   },
+  "dependencies": {
+    "ffi-rs": "1.3.7"
+  },
   "devDependencies": {
     "typebox": "1.3.27"
   },
   "scripts": {
     "bench": "node --experimental-strip-types bench/inspect-context.mjs",
     "build": "node scripts/build-worker.mjs",
-    "postinstall": "node scripts/build-worker.mjs",
-    "test": "npm run test:node && npm run build && npm run test:integration",
-    "test:node": "node --experimental-strip-types --test test/packet.test.ts test/adapter.test.ts test/tool.test.ts",
+    "prepare": "node scripts/build-typescript-worker.mjs",
+    "build:typescript": "node scripts/build-typescript-worker.mjs",
+    "test": "npm run test:node && npm run build && npm run test:typescript && npm run test:integration",
+    "test:node": "node --experimental-strip-types --test test/packet.test.ts test/adapter.test.ts test/tool.test.ts test/package.test.mjs test/benchmark.test.mjs test/benchmark-gate.test.mjs test/session-metrics.test.mjs",
+    "test:typescript": "npm run build:typescript && node --experimental-strip-types --test test/worker/*.test.mjs",
     "test:go": "cd worker && go test ./...",
     "test:integration": "node --experimental-strip-types --test test/integration.test.ts"
   }
