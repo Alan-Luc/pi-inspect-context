@@ -865,7 +865,7 @@ func TestWorkerGitGrepExitAndOverflowFailures(t *testing.T) {
 	}{
 		{name: "no matches", grepBody: "exit 1"},
 		{name: "other exit", grepBody: "printf 'grep failed\\n' >&2; exit 7", wantError: true},
-		{name: "stdout overflow", grepBody: "exec /bin/dd if=/dev/zero bs=8388609 count=1 2>/dev/null", wantError: true},
+		{name: "stdout overflow", grepBody: "printf '%8388609s' '' 2>/dev/null", wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -1659,7 +1659,7 @@ esac`,
 			script: `case "$3:$4" in
 rev-parse:--show-toplevel) printf '%s\n' "$PWD";;
 rev-parse:--verify) printf 'deadbeef\n';;
-ls-files:*) exec /bin/dd if=/dev/zero bs=8388609 count=1 2>/dev/null;;
+ls-files:*) printf '%8388609s' '' 2>/dev/null;;
 esac`,
 			message: "git output exceeded configured limit",
 		},
