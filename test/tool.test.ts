@@ -48,7 +48,7 @@ async function makeWorker(root: string): Promise<string> {
 
 test("registers exactly one direct sequential closed-world read-only tool", () => {
 	const registrations: Array<ReturnType<typeof createInspectContextTool>> = [];
-	registerInspectContext({ registerTool(tool) { registrations.push(tool); } });
+	registerInspectContext({ registerTool(tool) { registrations.push(tool); }, on() {} });
 	assert.equal(registrations.length, 1);
 	const tool = registrations[0];
 	assert.equal(tool.name, "inspect_context");

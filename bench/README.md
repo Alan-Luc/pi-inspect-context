@@ -1,9 +1,10 @@
 # Context measurements
 
-Run commands from the package root with Node 24 and Go 1.27.
+Run commands from the package root with Node 24, Bun 1.3.14 and Go 1.27 for legacy controls.
 Install the locked dependency with `npm ci --ignore-scripts --legacy-peer-deps`.
 The lockfile omits the host Pi peer dependency, so plain `npm ci` fails.
-Build the worker with `npm run build`.
+Build the default worker with `npm run build:typescript`.
+Build the retained Go control with `npm run build`.
 
 ## Public fixtures
 
@@ -11,7 +12,9 @@ Run `mkdir -p bench/local` before writing reports.
 Run `npm run bench -- --samples 10 --output bench/local/fixture.json`.
 The runner initializes disposable Git repositories from the committed fixtures.
 It performs one warmup per query before at least ten measured calls.
-It measures the actual tool implementation, including adapter validation and model content rendering.
+It measures the default extension when that entry exists, including validation, worker transport and model content rendering.
+It closes the registered session lifecycle after measurement.
+For historical runtime copies without an extension entry, it retains the adapter factory interface.
 It reports JSON instead of committing machine-specific results.
 
 The runner records every timed call, including failures.
@@ -78,7 +81,12 @@ Do not copy private results into CI artifacts or tracked documentation.
 Run `node bench/session-metrics.mjs --output bench/local/sessions.json SESSION.jsonl`.
 Use explicit local session paths rather than scanning unrelated history.
 The analyzer reads persisted tool payloads; it does not change telemetry collection.
-It measures read overlap, unmentioned files opened later, followup calls, and model content bytes.
+It measures read overlap, certified complete-body rereads, unmentioned files opened later, followup calls, and model content bytes.
+`redundantReadLines` retains all repeated excerpt lines, including partial context.
+`completeBodyRereadLines` counts returned read lines overlapping definitions or callers with `bodyComplete=true`.
+Merged ranges prevent duplicate excerpts from counting the same returned line twice.
+Use zero complete-body reread lines as the approved read gate; retain partial-context overlap as a separate diagnostic.
+This criterion does not establish a productivity improvement.
 A file opened later is a coverage observation, not proof the packet should have included it.
 Treat missing read ranges and incomplete sessions as unknown rather than zero.
 The analyzer rejects missing session identities and inputs without inspect calls.

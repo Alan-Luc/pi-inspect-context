@@ -13,6 +13,13 @@ test("package includes new model and worker runtime sources", () => {
 	assert.ifError(result.error);
 	assert.equal(result.status, 0, result.stderr);
 	const files = new Set(JSON.parse(result.stdout)[0].files.map((file) => file.path));
-	const requiredFiles = ["src/model-evidence.ts", "worker/body.go", "worker/scope.go"];
+	const requiredFiles = [
+		"src/git-executable.ts", "src/model-evidence.ts", "worker/body.go", "worker/scope.go",
+		"extensions/typescript.ts", "scripts/build-typescript-worker.mjs",
+		"src/session-model-evidence.ts", "src/worker/body.ts",
+		"src/worker/contracts.ts", "src/worker/engine.ts", "src/worker/git.ts",
+		"src/worker/native-files.ts", "src/worker/retrieval.ts", "src/worker/worker-input.ts",
+		"src/worker/worker-process.ts", "src/worker/worker-session.ts",
+	];
 	assert.deepEqual(requiredFiles.filter((path) => !files.has(path)), []);
 });

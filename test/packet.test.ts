@@ -93,6 +93,16 @@ test("matches the shared protocol goldens", async () => {
 	assert.equal(Value.Check(WORKER_REQUEST_SCHEMA, { ...request, extra: true }), false);
 });
 
+test("preserves the omission vocabulary and rejects invalid omission records", () => {
+	const reasons = ["aggregate_byte_limit", "binary_file", "dependency_or_vendor", "excerpt_limit", "file_limit", "generated_or_build", "ineligible_file", "invalid_utf8", "oversized_file", "packet_limit", "package_scope", "read_error"];
+	for (const reason of reasons) {
+		assert.equal(Value.Check(RESEARCH_PACKET_V1_SCHEMA, { ...packet(), omissions: [{ reason, count: 1, examples: ["src/a.ts"] }] }), true, reason);
+	}
+	for (const omission of [{ reason: "outside_reason", count: 1 }, { reason: 1, count: 1 }, { reason: null, count: 1 }, { reason: "read_error", count: -1 }, { reason: "read_error", count: 1, extra: true }]) {
+		assert.equal(Value.Check(RESEARCH_PACKET_V1_SCHEMA, { ...packet(), omissions: [omission] }), false);
+	}
+});
+
 test("serializes compact no-match packets and rejects packets above the byte budget", () => {
 	const noMatch = packet();
 	noMatch.matches = [];

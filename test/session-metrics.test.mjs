@@ -56,6 +56,7 @@ test("analyzes inspect reads until first edit and writes private aggregate outpu
     assert.equal((await stat(result.output)).mode & 0o777, 0o600);
     assert.equal(report.aggregate.inspectCount, 1);
     assert.equal(report.aggregate.redundantReadLines, 3);
+    assert.equal(report.aggregate.completeBodyRereadLines, 0);
   } finally {
     await rm(result.directory, { recursive: true, force: true });
   }
@@ -79,6 +80,53 @@ test("measures partial overlaps, unknown read ranges, nested wrappers, and answe
     assert.equal(report.sessions[0].inspects[0].unknownReadRanges, 1);
   } finally {
     await rm(result.directory, { recursive: true, force: true });
+  }
+});
+
+test("counts certified body rereads separately from partial context without double counting ranges", async () => {
+  const evidence = [
+    { ...excerpt("src/a.ts", 1, 4), kind: "definition", bodyComplete: true },
+    { ...excerpt("src/a.ts", 2, 4), kind: "caller", bodyComplete: true },
+    { ...excerpt("src/a.ts", 4, 7), kind: "definition", bodyComplete: false },
+    { ...excerpt("src/a.ts", 8, 9), kind: "caller", bodyComplete: "true" },
+    { ...excerpt("src/a.ts", 10, 12), kind: "match", bodyComplete: true },
+  ];
+  const result = await runSession([
+    entry("a", { role: "assistant", content: [call("i1", "inspect_context")] }),
+    entry("b", { role: "toolResult", toolCallId: "i1", toolName: "inspect_context", content: textBlock("{}"), details: packet(evidence) }),
+    entry("c", { role: "assistant", content: [call("r1", "read", { path: "src/a.ts", offset: 2, limit: 10 })] }),
+    entry("d", { role: "toolResult", toolCallId: "r1", toolName: "read", content: textBlock("2\n3\n4\n5\n6\n7\n8\n9\n10\n11") }),
+    entry("e", { role: "assistant", content: textBlock("Done") }),
+  ]);
+  try {
+    assert.equal(result.result.status, 0, result.result.stderr);
+    const report = JSON.parse(await readFile(result.output, "utf8"));
+    assert.equal(report.sessions[0].inspects[0].redundantReadLines, 10);
+    assert.equal(report.sessions[0].inspects[0].completeBodyRereadLines, 3);
+    assert.equal(report.aggregate.completeBodyRereadLines, 3);
+  } finally {
+    await rm(result.directory, { recursive: true, force: true });
+  }
+});
+
+test("does not certify a zero body-reread count with unknown ranges or an unfinished observation", async () => {
+  for (const scenario of [{ readReturned: false, answered: true }, { readReturned: true, answered: false }]) {
+    const entries = [
+      entry("a", { role: "assistant", content: [call("i1", "inspect_context")] }),
+      entry("b", { role: "toolResult", toolCallId: "i1", toolName: "inspect_context", content: textBlock("{}"), details: packet([{ ...excerpt("src/a.ts", 1, 4), kind: "definition", bodyComplete: true }]) }),
+      entry("c", { role: "assistant", content: [call("r1", "read", { path: "src/other.ts", offset: 1, limit: 2 })] }),
+    ];
+    if (scenario.readReturned) entries.push(entry("d", { role: "toolResult", toolCallId: "r1", toolName: "read", content: textBlock("one\ntwo") }));
+    if (scenario.answered) entries.push(entry("e", { role: "assistant", content: textBlock("Done") }));
+    const result = await runSession(entries);
+    try {
+      assert.equal(result.result.status, 0, result.result.stderr);
+      const report = JSON.parse(await readFile(result.output, "utf8"));
+      assert.equal(report.sessions[0].inspects[0].completeBodyRereadLines, null);
+      assert.equal(report.aggregate.completeBodyRereadLines, null);
+    } finally {
+      await rm(result.directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -179,6 +227,8 @@ test("keeps failed and incomplete inspections local and marks unfinished boundar
     const report = JSON.parse(await readFile(result.output, "utf8"));
     assert.equal(report.sessions[0].inspects[0].status, "failed");
     assert.equal(report.sessions[0].inspects[0].redundantReadLines, null);
+    assert.equal(report.sessions[0].inspects[0].completeBodyRereadLines, null);
+    assert.equal(report.aggregate.completeBodyRereadLines, null);
     assert.equal(report.sessions[0].inspects[1].status, "ok");
     assert.equal(report.sessions[0].inspects[1].callsToFirstEditOrAnswer, null);
     assert.equal(report.aggregate.callsToFirstEditOrAnswer, null);

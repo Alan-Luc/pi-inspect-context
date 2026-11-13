@@ -175,6 +175,7 @@ function emptyInspect(status, reason, result) {
     status,
     reason,
     redundantReadLines: null,
+    completeBodyRereadLines: null,
     missedFiles: null,
     toolCalls: null,
     callsToFirstEditOrAnswer: null,
@@ -195,6 +196,7 @@ function analyzeInspect(entries, inspectCall, inspectIndex, results, sessionCwd)
   const root = packetRoot(packet, sessionCwd);
   const rootResolution = root ? "resolved" : "unresolved";
   const returnedRanges = root ? packetRanges(packet, resolve(root, packet.target?.root ?? ".")) : new Map();
+  const completeBodyRanges = root ? packetRanges({ excerpts: packet.excerpts.filter((excerpt) => excerpt?.bodyComplete === true && (excerpt.kind === "definition" || excerpt.kind === "caller")) }, resolve(root, packet.target?.root ?? ".")) : new Map();
   const mentionedPaths = root ? packetPaths(packet, resolve(root, packet.target?.root ?? ".")) : new Set();
   const reads = [];
   const toolCounts = { read: 0, grep: 0, find: 0 };
@@ -224,6 +226,7 @@ function analyzeInspect(entries, inspectCall, inspectIndex, results, sessionCwd)
   }
 
   let redundantReadLines = 0;
+  let completeBodyRereadLines = 0;
   let unknownReadRanges = 0;
   const missed = new Set();
   for (const read of reads) {
@@ -236,12 +239,18 @@ function analyzeInspect(entries, inspectCall, inspectIndex, results, sessionCwd)
       const overlapEnd = Math.min(end, read.range[1]);
       if (overlapEnd >= overlapStart) redundantReadLines += overlapEnd - overlapStart + 1;
     }
+    for (const [start, end] of mergedRanges(completeBodyRanges.get(read.path) ?? [])) {
+      const overlapStart = Math.max(start, read.range[0]);
+      const overlapEnd = Math.min(end, read.range[1]);
+      if (overlapEnd >= overlapStart) completeBodyRereadLines += overlapEnd - overlapStart + 1;
+    }
   }
 
   const modelBytes = Buffer.byteLength(textContent(result.message.content), "utf8");
   return {
     status: "ok",
     redundantReadLines: root ? redundantReadLines : null,
+    completeBodyRereadLines: root && stopped && unknownReadRanges === 0 ? completeBodyRereadLines : null,
     missedFiles: root ? [...missed] : null,
     toolCalls: toolCounts,
     callsToFirstEditOrAnswer: stopped ? callsToStop : null,
@@ -287,6 +296,7 @@ function aggregate(sessions) {
   return {
     inspectCount: inspects.length,
     redundantReadLines: sumKnown(inspects, "redundantReadLines"),
+    completeBodyRereadLines: sumKnown(inspects, "completeBodyRereadLines"),
     missedFiles: inspects.every((inspect) => Array.isArray(inspect.missedFiles))
       ? [...new Set(inspects.flatMap((inspect) => inspect.missedFiles))]
       : null,

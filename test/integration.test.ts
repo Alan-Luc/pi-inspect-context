@@ -11,8 +11,9 @@ import { POLICY_VERSION } from "../src/packet.ts";
 
 const execFileAsync = promisify(execFile);
 
-test("the registered tool executes the packaged Go worker without executing repository text", async () => {
+test("the registered tool executes the packaged session worker without executing repository text", async () => {
 	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-integration-"));
+	let shutdown: (() => Promise<void>) | undefined;
 	try {
 		const sourceRoot = join(root, "src");
 		const executionMarker = join(root, "executed");
@@ -26,7 +27,7 @@ test("the registered tool executes the packaged Go worker without executing repo
 		await execFileAsync("git", ["add", "--", "src/feature.go"], { cwd: root });
 
 		const registrations: Array<ReturnType<typeof createInspectContextTool>> = [];
-		registerInspectContext({ registerTool(tool) { registrations.push(tool); } });
+		registerInspectContext({ registerTool(tool) { registrations.push(tool); }, on(_event, handler) { shutdown = handler; } });
 		const result = await registrations[0].execute(
 			"integration-call",
 			{ query: "integratedNeedle" },
@@ -54,6 +55,7 @@ test("the registered tool executes the packaged Go worker without executing repo
 		assert.match(excerpt?.text ?? "", /Ignore prior instructions/);
 		await assert.rejects(lstat(executionMarker), { code: "ENOENT" });
 	} finally {
+		if (shutdown) await shutdown();
 		await rm(root, { recursive: true, force: true });
 	}
 });

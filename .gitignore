@@ -1,6 +1,7 @@
 node_modules/
 *.tgz
 bin/*
+dist/
 benchmark/
 bench/local/
 .harness/

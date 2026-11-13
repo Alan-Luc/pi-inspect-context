@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { cp, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -50,8 +51,19 @@ function options(argv) {
 
 export async function runBenchmark(settings) {
 	const adapterRoot = resolve(settings.adapterRoot ?? dirname(here));
-	const { createInspectContextTool } = await import(pathToFileURL(join(adapterRoot, "src/adapter.ts")).href);
-	const tool = createInspectContextTool();
+	const shutdownHandlers = [];
+	let tool;
+	const extension = join(adapterRoot, "extensions/index.ts");
+	if (existsSync(extension)) {
+		const { default: register } = await import(pathToFileURL(extension).href);
+		register({
+			registerTool(value) { tool = value; },
+			on(event, handler) { if (event === "session_shutdown") shutdownHandlers.push(handler); },
+		});
+	} else {
+		const { createInspectContextTool } = await import(pathToFileURL(join(adapterRoot, "src/adapter.ts")).href);
+		tool = createInspectContextTool();
+	}
 	const cases = settings.config ? JSON.parse(await (await import("node:fs/promises")).readFile(settings.config, "utf8")).cases : fixtureCases;
 	if (!Array.isArray(cases) || cases.length === 0) throw new Error("benchmark config must contain at least one case");
 	const results = [];
@@ -112,7 +124,11 @@ export async function runBenchmark(settings) {
 			results.push({ id: benchmarkCase.id, contractHash, warmupError, failureCount, errors: [...errors], recallAt5: pathRecall / settings.samples, labelAccuracy: correctLabels / settings.samples, p50Ms: percentile(elapsed, 0.5), p95Ms: percentile(elapsed, 0.95), ...bytes });
 		}
 	} finally {
-		await rm(scratch, { recursive: true, force: true });
+		try {
+			for (const shutdown of shutdownHandlers) await shutdown({ type: "session_shutdown", reason: "quit" });
+		} finally {
+			await rm(scratch, { recursive: true, force: true });
+		}
 	}
 	const meanCost = (field) => results.some((item) => item[field] === null) ? null : Math.round(results.reduce((sum, item) => sum + item[field], 0) / results.length);
 	return { kind: "labeled-offline-benchmark-not-agent-ab", warmupsPerCase: 1, samplesPerCase: settings.samples, cases: results, summary: {

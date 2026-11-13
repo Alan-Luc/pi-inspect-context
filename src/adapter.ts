@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { Value } from "typebox/value";
 import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { renderModelEvidence } from "./model-evidence.ts";
+import { resolveGitExecutable } from "./git-executable.ts";
 import {
 	AUTHORIZATION_MANIFEST_SCHEMA,
 	INSPECT_CONTEXT_PARAMETERS,
@@ -31,6 +32,7 @@ const MAX_GIT_BYTES = 4 * 1024;
 const DEFAULT_TIMEOUT_MS = 2_000;
 const KILL_GRACE_MS = 250;
 const POSIX_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
+let gitExecutable: string | undefined;
 
 export type InspectionTarget = {
 	root: string;
@@ -328,13 +330,17 @@ async function runBoundedProcess(executable: string, args: readonly string[], op
 }
 
 async function runGit(cwd: string, signal?: AbortSignal): Promise<string> {
-	const result = await runBoundedProcess("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
+	const started = performance.now();
+	const executable = gitExecutable ??= resolveGitExecutable(POSIX_PATH);
+	const timeoutMs = DEFAULT_TIMEOUT_MS - Math.ceil(performance.now() - started);
+	if (timeoutMs <= 0) fail("git_resolution", `Git root resolution timed out after ${DEFAULT_TIMEOUT_MS}ms`);
+	const result = await runBoundedProcess(executable, ["-C", cwd, "rev-parse", "--show-toplevel"], {
 		cwd,
 		environment: gitEnvironment(),
 		label: "Git root resolution",
 		maxStdoutBytes: MAX_GIT_BYTES,
 		maxStderrBytes: MAX_STDERR_BYTES,
-		timeoutMs: DEFAULT_TIMEOUT_MS,
+		timeoutMs,
 		signal,
 	});
 	if (result.signal !== null || result.code !== 0) {

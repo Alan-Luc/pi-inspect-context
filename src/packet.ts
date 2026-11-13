@@ -66,7 +66,7 @@ const ExcerptSchema = Type.Object(
 
 const OmissionGroupSchema = Type.Object(
 	{
-		reason: Type.Union(OMISSION_REASONS.map((reason) => Type.Literal(reason))),
+		reason: Type.Enum(OMISSION_REASONS),
 		count: Type.Integer({ minimum: 0 }),
 		examples: Type.Optional(Type.Array(Type.String(), { maxItems: MAX_OMISSION_EXAMPLES })),
 	},

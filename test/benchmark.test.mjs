@@ -59,6 +59,32 @@ test("private config inspects the original root without copying or changing its 
 	}
 });
 
+test("benchmarks the default extension and closes its owned session", async () => {
+	const scratch = await mkdtemp(join(tmpdir(), "benchmark-default-extension-"));
+	try {
+		const root = join(scratch, "repository");
+		const adapterRoot = join(scratch, "adapter");
+		const marker = join(scratch, "closed");
+		await mkdir(root);
+		await mkdir(join(adapterRoot, "src"), { recursive: true });
+		await mkdir(join(adapterRoot, "extensions"));
+		await writeFile(join(adapterRoot, "src/adapter.ts"), 'export function createInspectContextTool() { throw new Error("legacy adapter selected instead of default extension"); }\n');
+		await writeFile(join(adapterRoot, "extensions/index.ts"), `import {writeFile} from "node:fs/promises";
+			export default function register(pi) {
+				pi.registerTool({execute:async()=>({details:{excerpts:[{path:"source.ts",startLine:1,endLine:1,kind:"definition"}]},content:[{type:"text",text:"default"}]})});
+				pi.on("session_shutdown",async()=>{await writeFile(${JSON.stringify(marker)},"closed");});
+			}`);
+		const config = join(scratch, "config.json");
+		await writeFile(config, JSON.stringify({ cases: [{ id: "default", root, query: "symbol", expected: [{ path: "source.ts", line: 1, kind: "definition" }] }] }));
+		const report = await runBenchmark({ config, adapterRoot, samples: 10 });
+		assert.equal(report.cases[0].recallAt5, 1);
+		assert.equal(report.cases[0].contentBytes, 7);
+		assert.equal(await readFile(marker, "utf8"), "closed");
+	} finally {
+		await rm(scratch, { recursive: true, force: true });
+	}
+});
+
 test("configured cwd cannot escape its selected repository", async () => {
 	const scratch = await mkdtemp(join(tmpdir(), "benchmark-containment-"));
 	try {
