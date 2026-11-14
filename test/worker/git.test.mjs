@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import cp, { execFile } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { constants, openSync, closeSync, fstatSync } from 'node:fs';
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -56,6 +57,21 @@ test('metadata commands that ignore stdin preserve Git success and failure resul
     const failure = await runGit(descriptor, ['inspect-context-missing-command']);
     assert.notEqual(failure.code, 0);
     assert.match(failure.stderr.toString(), /not a git command/);
+  });
+});
+
+test('Git commands explicitly disable optional locks', async () => {
+  await repository(async (_root, descriptor) => {
+    const original = cp.spawn;
+    let launch;
+    cp.spawn = (...args) => { launch = args; return original(...args); };
+    syncBuiltinESMExports();
+    try {
+      const result = await runGit(descriptor, ['--version']);
+      assert.equal(result.code, 0);
+      assert.deepEqual(launch[1].slice(0, 4), ['-c', 'core.fsmonitor=false', '--no-optional-locks', '--version']);
+      assert.equal(launch[2].env.GIT_OPTIONAL_LOCKS, '0');
+    } finally { cp.spawn = original; syncBuiltinESMExports(); }
   });
 });
 

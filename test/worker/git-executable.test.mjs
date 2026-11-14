@@ -10,6 +10,19 @@ import test from 'node:test';
 
 const selected = process.platform === 'darwin' ? cp.spawnSync('/usr/bin/xcrun', ['--find', 'git'], { encoding: 'utf8' }).stdout.trimEnd() : 'git';
 
+test('Git root resolution explicitly disables optional locks', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'inspect-root-no-locks-')));
+  cp.execFileSync('git', ['init', '--quiet'], { cwd: root });
+  const original = cp.spawn;
+  let argv;
+  cp.spawn = (file, args, options) => { argv = args; return original(file, args, options); };
+  syncBuiltinESMExports();
+  try {
+    assert.equal(await resolveInspectionRoot(root), root);
+    assert.deepEqual(argv, ['--no-optional-locks', '-C', root, 'rev-parse', '--show-toplevel']);
+  } finally { cp.spawn = original; syncBuiltinESMExports(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('selects the real developer-tools Git when the system launcher owns the sanitized PATH', { skip: process.platform !== 'darwin' }, () => {
   assert.notEqual(selected, '/usr/bin/git');
   assert.equal(resolveGitExecutable(process.env.PATH ?? '/usr/bin:/bin'), selected);

@@ -786,11 +786,11 @@ record() {
 }
 record "$@"
 case "$*" in
-"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
-"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z") printf 'H src/config.go\0';;
-"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
-"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false --no-optional-locks rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false --no-optional-locks rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false --no-optional-locks ls-files -t --cached --others --exclude-standard -z") printf 'H src/config.go\0';;
+"-c core.fsmonitor=false --no-optional-locks status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false --no-optional-locks grep --cached -F -i -I -l -z -f - --")
   IFS= read -r term || exit 91
   if command -v sha256sum >/dev/null 2>&1; then actual=$(printf '%%s' "$term" | sha256sum | cut -d' ' -f1); else actual=$(printf '%%s' "$term" | shasum -a 256 | cut -d' ' -f1); fi
   [ "$actual" = %q ] || exit 92
@@ -823,9 +823,9 @@ esac
 		value string
 		count int
 	}{
-		{name: "inventory", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fls-files\x1f-t\x1f--cached\x1f--others\x1f--exclude-standard\x1f-z\n", count: 2},
-		{name: "status", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fstatus\x1f--porcelain=v2\x1f-z\x1f--untracked-files=all\x1f--no-renames\n", count: 2},
-		{name: "grep", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1fgrep\x1f--cached\x1f-F\x1f-i\x1f-I\x1f-l\x1f-z\x1f-f\x1f-\x1f--\n", count: 1},
+		{name: "inventory", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1f--no-optional-locks\x1fls-files\x1f-t\x1f--cached\x1f--others\x1f--exclude-standard\x1f-z\n", count: 2},
+		{name: "status", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1f--no-optional-locks\x1fstatus\x1f--porcelain=v2\x1f-z\x1f--untracked-files=all\x1f--no-renames\n", count: 2},
+		{name: "grep", value: "argv\x1f-c\x1fcore.fsmonitor=false\x1f--no-optional-locks\x1fgrep\x1f--cached\x1f-F\x1f-i\x1f-I\x1f-l\x1f-z\x1f-f\x1f-\x1f--\n", count: 1},
 	} {
 		if got := strings.Count(log, vector.value); got != vector.count {
 			t.Errorf("%s vector count = %d, want %d", vector.name, got, vector.count)
@@ -874,11 +874,11 @@ func TestWorkerGitGrepExitAndOverflowFailures(t *testing.T) {
 			marker := filepath.Join(root, "grep-called")
 			installFakeGit(t, fmt.Sprintf(`
 case "$*" in
-"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
-"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z") printf 'H src/file.go\0';;
-"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
-"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false --no-optional-locks rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false --no-optional-locks rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false --no-optional-locks ls-files -t --cached --others --exclude-standard -z") printf 'H src/file.go\0';;
+"-c core.fsmonitor=false --no-optional-locks status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false --no-optional-locks grep --cached -F -i -I -l -z -f - --")
   printf called > %q
   %s;;
 esac
@@ -906,11 +906,11 @@ func TestWorkerNonASCIIQueryUsesBoundedGoPath(t *testing.T) {
 	marker := filepath.Join(root, "grep-called")
 	installFakeGit(t, fmt.Sprintf(`
 case "$*" in
-"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
-"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z") printf 'H unicode.go\0';;
-"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
-"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --") printf called > %q; exit 99;;
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false --no-optional-locks rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false --no-optional-locks rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false --no-optional-locks ls-files -t --cached --others --exclude-standard -z") printf 'H unicode.go\0';;
+"-c core.fsmonitor=false --no-optional-locks status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false --no-optional-locks grep --cached -F -i -I -l -z -f - --") printf called > %q; exit 99;;
 esac
 `, marker))
 	packet, _, err := invokeWorker(t, root, "cafékey")
@@ -936,14 +936,14 @@ func TestWorkerGitDiscoveryFindsLateTrackedCandidate(t *testing.T) {
 	writeWorkerFile(t, root, "zzzz/LateGammaKey.go", "func LateGammaKey() {}\n")
 	installFakeGit(t, fmt.Sprintf(`
 case "$*" in
-"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
-"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z")
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false --no-optional-locks rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false --no-optional-locks rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false --no-optional-locks ls-files -t --cached --others --exclude-standard -z")
   index=0
   while [ "$index" -lt %d ]; do printf 'H a-%%04d.txt\0' "$index"; index=$((index+1)); done
   printf 'H zzzz/LateGammaKey.go\0';;
-"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
-"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --") cat >/dev/null; printf 'zzzz/LateGammaKey.go\0';;
+"-c core.fsmonitor=false --no-optional-locks status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false --no-optional-locks grep --cached -F -i -I -l -z -f - --") cat >/dev/null; printf 'zzzz/LateGammaKey.go\0';;
 esac
 `, maxDiscoveredFiles))
 	packet, _, err := invokeWorker(t, root, "LateGammaKey")
@@ -973,14 +973,14 @@ func TestWorkerGitCleanCandidateTailIsBounded(t *testing.T) {
 	}
 	installFakeGit(t, fmt.Sprintf(`
 case "$*" in
-"rev-parse --show-toplevel"|"-c core.fsmonitor=false rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
-"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
-"-c core.fsmonitor=false ls-files -t --cached --others --exclude-standard -z"|"-c core.fsmonitor=false grep --cached -F -i -I -l -z -f - --")
+"rev-parse --show-toplevel"|"-c core.fsmonitor=false --no-optional-locks rev-parse --show-toplevel") printf '%%s\n' "$PWD";;
+"rev-parse --verify --quiet HEAD"|"-c core.fsmonitor=false --no-optional-locks rev-parse --verify --quiet HEAD") printf 'deadbeef\n';;
+"-c core.fsmonitor=false --no-optional-locks ls-files -t --cached --others --exclude-standard -z"|"-c core.fsmonitor=false --no-optional-locks grep --cached -F -i -I -l -z -f - --")
   prefix=''
-  [ "$3" != ls-files ] || prefix='H '
+  [ "$4" != ls-files ] || prefix='H '
   index=0
   while [ "$index" -lt %d ]; do printf '%%scandidate-%%03d.go\0' "$prefix" "$index"; index=$((index+1)); done;;
-"-c core.fsmonitor=false status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
+"-c core.fsmonitor=false --no-optional-locks status --porcelain=v2 -z --untracked-files=all --no-renames") :;;
 esac
 `, totalCandidates))
 
@@ -1610,25 +1610,25 @@ func TestWorkerGitMetadataFailuresAreErrors(t *testing.T) {
 	}{
 		{
 			name: "rev-parse failure",
-			script: `case "$3:$4" in
+			script: `case "$4:$5" in
 rev-parse:--show-toplevel) exit 7;;
 esac`,
 		},
 		{
 			name: "mismatched top level",
-			script: `case "$3:$4" in
+			script: `case "$4:$5" in
 rev-parse:--show-toplevel) printf '/tmp\n';;
 esac`,
 		},
 		{
 			name: "malformed top level",
-			script: `case "$3:$4" in
+			script: `case "$4:$5" in
 rev-parse:--show-toplevel) printf '%s\nextra\n' "$PWD";;
 esac`,
 		},
 		{
 			name: "malformed HEAD",
-			script: `case "$3:$4" in
+			script: `case "$4:$5" in
 rev-parse:--show-toplevel) printf '%s\n' "$PWD";;
 rev-parse:--verify) printf 'deadbeef\nextra\n';;
 esac`,
@@ -1653,7 +1653,7 @@ func TestWorkerGitInventoryFailureAndOverflow(t *testing.T) {
 	}{
 		{
 			name: "command failure",
-			script: `case "$3:$4" in
+			script: `case "$4:$5" in
 rev-parse:--show-toplevel) printf '%s\n' "$PWD";;
 rev-parse:--verify) printf 'deadbeef\n';;
 ls-files:*) printf 'inventory failed\n' >&2; exit 9;;
@@ -1662,7 +1662,7 @@ esac`,
 		},
 		{
 			name: "stdout overflow",
-			script: `case "$3:$4" in
+			script: `case "$4:$5" in
 rev-parse:--show-toplevel) printf '%s\n' "$PWD";;
 rev-parse:--verify) printf 'deadbeef\n';;
 ls-files:*) printf '%8388609s' '' 2>/dev/null;;
@@ -1910,7 +1910,7 @@ func TestWorkerDetectsScanTimeRootReplacement(t *testing.T) {
 	installFakeGit(t, `
 root=$(pwd -P)
 marker="${root}.replacement-marker"
-case "$3:$4" in
+case "$4:$5" in
 rev-parse:--show-toplevel) printf '%s\n' "$root";;
 rev-parse:--verify) printf 'deadbeef\n';;
 ls-files:*)

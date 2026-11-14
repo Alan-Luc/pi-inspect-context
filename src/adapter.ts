@@ -334,7 +334,7 @@ async function runGit(cwd: string, signal?: AbortSignal): Promise<string> {
 	const executable = gitExecutable ??= resolveGitExecutable(POSIX_PATH);
 	const timeoutMs = DEFAULT_TIMEOUT_MS - Math.ceil(performance.now() - started);
 	if (timeoutMs <= 0) fail("git_resolution", `Git root resolution timed out after ${DEFAULT_TIMEOUT_MS}ms`);
-	const result = await runBoundedProcess(executable, ["-C", cwd, "rev-parse", "--show-toplevel"], {
+	const result = await runBoundedProcess(executable, ["--no-optional-locks", "-C", cwd, "rev-parse", "--show-toplevel"], {
 		cwd,
 		environment: gitEnvironment(),
 		label: "Git root resolution",

@@ -4,7 +4,7 @@ import { posix, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { Value } from 'typebox/value';
 import { acquireNativeFiles, NativeFileError, openAt, readDirectory, statAt, type FileMetadata } from './native-files.ts';
-import { parseGitLine, parseGitPaths, parseGitMatchPaths, parseGitStatusPaths, runGit, safeRepositoryPath } from './git.ts';
+import { parseGitLine, parseGitPaths, parseGitMatchPaths, parseGitStatusPaths, runGit, safeRepositoryPath, type GitOutput } from './git.ts';
 import { buildEvidencePacket, extractSearchTerms, matchingSearchTerms, matchingPathTerms, orderGitCandidates, exclusionReason, exclusionReasonForDirectory, lowercaseSearchText, Omissions, sourceLines } from './retrieval.ts';
 import type { GitCandidate, RetrievalFile } from './contracts.ts';
 import { AUTHORIZATION_MANIFEST_SCHEMA, WORKER_REQUEST_SCHEMA, MAX_AGGREGATE_READ_BYTES, MAX_DISCOVERED_FILES, MAX_FILE_BYTES, MAX_QUERY_BYTES, InspectContextError, type AuthorizationManifest, type OmissionReason, type ResearchPacketV1, type WorkerRequest } from '../packet.ts';
@@ -18,7 +18,11 @@ const maxGitCleanCandidates = 64;
 const maxGitSearchWorkers = 4;
 const packageMarkers = new Set(['package.json', 'pyproject.toml', 'go.mod', 'Cargo.toml', 'pom.xml', 'build.gradle']);
 type InventoryEntry = { path: string; metadata?: FileMetadata; excluded?: OmissionReason };
-type Inventory = { kind: 'git' | 'filesystem'; entries: InventoryEntry[]; fingerprint: string; revision?: string; worktree: Set<string> };
+type SparseAdmission = { path: string; kind: 'absent' } | { path: string; kind: 'present'; metadata: FileMetadata };
+type InventoryFields = { entries: InventoryEntry[]; fingerprint: string; worktree: Set<string> };
+type FilesystemInventory = InventoryFields & { kind: 'filesystem' };
+type GitInventory = InventoryFields & { kind: 'git'; revision: string | undefined; status: Buffer; sparseAdmissions: SparseAdmission[]; skipWorktreePaths: Set<string> };
+type Inventory = FilesystemInventory | GitInventory;
 
 function compareText(left: string, right: string): number { return Buffer.compare(Buffer.from(left), Buffer.from(right)); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
@@ -108,6 +112,57 @@ function nearestScope(root: number, cwd: string, inventory: Inventory): string {
   return '.';
 }
 function localPath(path: string, scope: string): boolean { return scope === '.' || path.startsWith(`${scope}/`); }
+function parseGitRevision(result: GitOutput, label: string): string | undefined {
+  if (result.code === 1 && !result.stdout.length && !result.stderr.length) return undefined;
+  if (result.code !== 0) throw new InspectContextError('inventory', `${label} failed: ${result.stderr.toString().trim()}`);
+  return parseGitLine(result.stdout, label);
+}
+async function verifyGitRoot(rootPath: string, root: number, signal?: AbortSignal): Promise<void> {
+  metadataAt(root, '.git');
+  const top = await runGit(root, ['rev-parse', '--show-toplevel'], '', 4096, signal);
+  if (top.code !== 0) throw new InspectContextError('inventory', `Git top-level discovery failed: ${top.stderr.toString().trim()}`);
+  const topPath = parseGitLine(top.stdout, 'Git top-level');
+  if (resolve(topPath) !== topPath || realpathSync(topPath) !== rootPath) throw new InspectContextError('root', 'Git top-level does not match the authorized root');
+}
+async function verifyGitSnapshot(rootPath: string, root: number, initial: GitInventory, signal?: AbortSignal): Promise<void> {
+  await verifyGitRoot(rootPath, root, signal);
+  const outcomes = await Promise.allSettled([
+    runGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], '', 4096, signal),
+    runGit(root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-renames'], '', undefined, signal),
+    runGit(root, ['ls-files', '-t', '--cached', '-z'], '', undefined, signal),
+  ]);
+  const [head, status, listing] = outcomes.map(outcome => {
+    if (outcome.status === 'rejected') throw outcome.reason;
+    return outcome.value;
+  });
+  const revision = parseGitRevision(head, 'Git HEAD');
+  if (revision !== initial.revision) throw new InspectContextError('snapshot_changed', 'Git HEAD changed during scan');
+  if (status.code !== 0) throw new InspectContextError('inventory', `Git status failed: ${status.stderr.toString().trim()}`);
+  if (!initial.status.equals(status.stdout)) throw new InspectContextError('snapshot_changed', 'Git status changed during scan');
+  if (listing.code !== 0) throw new InspectContextError('inventory', `Git flag check failed: ${listing.stderr.toString().trim()}`);
+  const skipWorktreePaths = new Set(parseGitPaths(listing.stdout).filter(entry => entry.skipWorktree).map(entry => entry.path));
+  if (initial.skipWorktreePaths.size !== skipWorktreePaths.size || [...initial.skipWorktreePaths].some(path => !skipWorktreePaths.has(path))) throw new InspectContextError('snapshot_changed', 'Git skip-worktree flags changed during scan');
+  const entries = new Map(initial.entries.map(entry => [entry.path, entry]));
+  for (const path of initial.worktree) {
+    const expected = entries.get(path)?.metadata;
+    let metadata: FileMetadata;
+    try { metadata = metadataAt(root, path); }
+    catch (error) {
+      if (!expected && hasErrorCode(error, 'ENOENT')) continue;
+      throw new InspectContextError('snapshot_changed', `worktree admission changed during scan: ${path}`);
+    }
+    if (!expected || !sameMetadata(metadata, expected)) throw new InspectContextError('snapshot_changed', `worktree admission changed during scan: ${path}`);
+  }
+  for (const admission of initial.sparseAdmissions) {
+    let metadata: FileMetadata;
+    try { metadata = metadataAt(root, admission.path); }
+    catch (error) {
+      if (admission.kind === 'absent' && hasErrorCode(error, 'ENOENT')) continue;
+      throw new InspectContextError('snapshot_changed', `sparse admission changed during scan: ${admission.path}`);
+    }
+    if (admission.kind === 'absent' || !sameMetadata(metadata, admission.metadata)) throw new InspectContextError('snapshot_changed', `sparse admission changed during scan: ${admission.path}`);
+  }
+}
 async function collectInventory(rootPath: string, root: number, signal?: AbortSignal): Promise<Inventory> {
   signal?.throwIfAborted();
   let marker: FileMetadata | undefined;
@@ -142,10 +197,7 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
     const fingerprint = createHash('sha256').update(entries.map(fileFingerprint).join('')).digest('hex');
     return { kind: 'filesystem', entries: entries.sort((a, b) => compareText(a.path, b.path)), fingerprint, worktree: new Set() };
   }
-  const top = await runGit(root, ['rev-parse', '--show-toplevel'], '', 4096, signal);
-  if (top.code !== 0) throw new InspectContextError('inventory', `Git top-level discovery failed: ${top.stderr.toString().trim()}`);
-  const topPath = parseGitLine(top.stdout, 'Git top-level');
-  if (resolve(topPath) !== topPath || realpathSync(topPath) !== rootPath) throw new InspectContextError('root', 'Git top-level does not match the authorized root');
+  await verifyGitRoot(rootPath, root, signal);
   const outcomes = await Promise.allSettled([
     runGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], '', 4096, signal),
     runGit(root, ['ls-files', '-t', '--cached', '--others', '--exclude-standard', '-z'], '', undefined, signal),
@@ -155,22 +207,24 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
     if (outcome.status === 'rejected') throw outcome.reason;
     return outcome.value;
   });
-  let revision: string | undefined;
-  if (head.code !== 1 || head.stdout.length || head.stderr.length) {
-    if (head.code !== 0) throw new InspectContextError('inventory', `Git HEAD failed: ${head.stderr.toString().trim()}`);
-    revision = parseGitLine(head.stdout, 'Git HEAD');
-  }
+  const revision = parseGitRevision(head, 'Git HEAD');
   if (listing.code !== 0) throw new InspectContextError('inventory', `Git inventory failed: ${listing.stderr.toString().trim()}`);
   const paths = parseGitPaths(listing.stdout);
   const known = new Set<string>();
+  const skipWorktreePaths = new Set(paths.filter(entry => entry.skipWorktree).map(entry => entry.path));
+  const sparseAdmissions: SparseAdmission[] = [];
   for (const { path, skipWorktree } of paths) {
     known.add(path);
     const entry: InventoryEntry = { path, excluded: exclusionReason(path) };
     if (skipWorktree && !entry.excluded) {
-      try { entry.metadata = metadataAt(root, path); }
-      catch (error) {
+      try {
+        const metadata = metadataAt(root, path);
+        entry.metadata = metadata;
+        sparseAdmissions.push({ path, kind: 'present', metadata });
+      } catch (error) {
         if (!hasErrorCode(error, 'ENOENT')) throw error;
         entry.excluded = 'ineligible_file';
+        sparseAdmissions.push({ path, kind: 'absent' });
       }
     }
     entries.push(entry);
@@ -194,7 +248,7 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
   fingerprint.update(`inventory\0${listing.stdout.length}\0`).update(listing.stdout);
   fingerprint.update(`status\0${status.stdout.length}\0`).update(status.stdout);
   for (const entry of entries) fingerprint.update(`worktree\0${fileFingerprint(entry)}`);
-  return { kind: 'git', entries: entries.sort((a, b) => compareText(a.path, b.path)), fingerprint: fingerprint.digest('hex'), revision, worktree };
+  return { kind: 'git', entries: entries.sort((a, b) => compareText(a.path, b.path)), fingerprint: fingerprint.digest('hex'), revision, status: status.stdout, sparseAdmissions, skipWorktreePaths, worktree };
 }
 
 export class InspectionEngine {
@@ -337,10 +391,15 @@ export class InspectionEngine {
       signal?.throwIfAborted();
       const discoveryMs = Math.max(0, performance.now() - discoveryStarted - directReadsMs);
       const finalSnapshotStarted = performance.now();
-      let final: Inventory;
-      try { final = await collectInventory(request.root, root, signal); }
-      catch (error) { throw new InspectContextError('snapshot_changed', `final inventory: ${errorMessage(error)}`); }
-      if (initial.kind !== final.kind || initial.revision !== final.revision || initial.fingerprint !== final.fingerprint) throw new InspectContextError('snapshot_changed', 'repository snapshot changed during scan');
+      if (initial.kind === 'git') {
+        try { await verifyGitSnapshot(request.root, root, initial, signal); }
+        catch (error) { throw new InspectContextError('snapshot_changed', `final Git state: ${errorMessage(error)}`); }
+      } else {
+        let final: Inventory;
+        try { final = await collectInventory(request.root, root, signal); }
+        catch (error) { throw new InspectContextError('snapshot_changed', `final inventory: ${errorMessage(error)}`); }
+        if (final.kind !== 'filesystem' || initial.fingerprint !== final.fingerprint) throw new InspectContextError('snapshot_changed', 'repository snapshot changed during scan');
+      }
       try {
         const currentRoot = openRoot(request.root);
         try { if (!sameRoot(rootIdentity, descriptorMetadata(currentRoot))) throw new InspectContextError('snapshot_changed', 'authorized root changed during scan'); }
@@ -355,7 +414,7 @@ export class InspectionEngine {
       const finalSnapshotMs = Math.max(0, performance.now() - finalSnapshotStarted);
       const stageDurationsMs = { discovery: discoveryMs, directReads: directReadsMs, retrievalRanking: 0, finalSnapshot: finalSnapshotMs };
       const retrievalStarted = performance.now();
-      const packet = buildEvidencePacket({ query, cwd, repository: initial.kind, revision: initial.revision, snapshotId: initial.fingerprint, files, scope, discoveredFiles, readFiles, bytesRead, omissions: omissions.values(), durationMs: performance.now() - started, stageDurationsMs });
+      const packet = buildEvidencePacket({ query, cwd, repository: initial.kind, revision: initial.kind === 'git' ? initial.revision : undefined, snapshotId: initial.fingerprint, files, scope, discoveredFiles, readFiles, bytesRead, omissions: omissions.values(), durationMs: performance.now() - started, stageDurationsMs });
       stageDurationsMs.retrievalRanking = Math.max(0, performance.now() - retrievalStarted);
       return packet;
     } finally { closeSync(root); }

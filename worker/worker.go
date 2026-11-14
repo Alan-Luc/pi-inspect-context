@@ -1882,7 +1882,7 @@ func runGit(repository *openedRepository, args []string, outputLimit int) (comma
 }
 
 func runGitInput(repository *openedRepository, args []string, input string, outputLimit int) (commandResult, error) {
-	args = append([]string{"-c", "core.fsmonitor=false"}, args...)
+	args = append([]string{"-c", "core.fsmonitor=false", "--no-optional-locks"}, args...)
 	command := exec.Command("git", args...)
 	command.Env = gitEnvironment()
 	command.Stdin = strings.NewReader(input)
