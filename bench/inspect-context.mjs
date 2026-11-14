@@ -68,6 +68,7 @@ export async function runBenchmark(settings) {
 	if (!Array.isArray(cases) || cases.length === 0) throw new Error("benchmark config must contain at least one case");
 	const results = [];
 	const elapsedAll = [];
+	const stageSamples = new Map();
 	const scratch = await mkdtemp(join(await realpath(tmpdir()), "inspect-context-bench-"));
 	try {
 		for (const benchmarkCase of cases) {
@@ -93,6 +94,7 @@ export async function runBenchmark(settings) {
 				warmupError = error instanceof Error ? error.message : String(error);
 			}
 			const elapsed = [];
+			const caseStageSamples = new Map();
 			const errors = new Set();
 			const expectedPaths = [...new Set(benchmarkCase.expected.map(({ path }) => path))];
 			let failureCount = 0;
@@ -115,13 +117,19 @@ export async function runBenchmark(settings) {
 				}
 				const { result } = outcome;
 				const packet = result.details;
+				for (const [stage, duration] of Object.entries(packet.receipt?.stageDurationsMs ?? {})) {
+					if (typeof duration !== "number" || !Number.isFinite(duration) || duration < 0) continue;
+					caseStageSamples.set(stage, [...(caseStageSamples.get(stage) ?? []), duration]);
+					stageSamples.set(stage, [...(stageSamples.get(stage) ?? []), duration]);
+				}
 				pathRecall += recallAt5(packet, expectedPaths);
 				correctLabels += labelAccuracy(packet, benchmarkCase.expected);
 				bytes = measureBytes(packet, result.content.filter((block) => block.type === "text").map((block) => block.text).join(""));
 			}
 			elapsedAll.push(...elapsed);
 			const contractHash = createHash("sha256").update(JSON.stringify({root: benchmarkCase.root, cwd: relativeCwd, query: benchmarkCase.query, expected: benchmarkCase.expected})).digest("hex");
-			results.push({ id: benchmarkCase.id, contractHash, warmupError, failureCount, errors: [...errors], recallAt5: pathRecall / settings.samples, labelAccuracy: correctLabels / settings.samples, p50Ms: percentile(elapsed, 0.5), p95Ms: percentile(elapsed, 0.95), ...bytes });
+			const summarizeStages = (samples) => Object.fromEntries([...samples].map(([stage, values]) => [stage, { p50Ms: percentile(values, 0.5), p95Ms: percentile(values, 0.95) }]));
+			results.push({ id: benchmarkCase.id, contractHash, warmupError, failureCount, errors: [...errors], recallAt5: pathRecall / settings.samples, labelAccuracy: correctLabels / settings.samples, p50Ms: percentile(elapsed, 0.5), p95Ms: percentile(elapsed, 0.95), stageDurationsMs: summarizeStages(caseStageSamples), ...bytes });
 		}
 	} finally {
 		try {
@@ -140,6 +148,7 @@ export async function runBenchmark(settings) {
 		packetBytes: meanCost("packetBytes"),
 		contentBytes: meanCost("contentBytes"),
 		contentTokens: meanCost("contentTokens"),
+		stageDurationsMs: Object.fromEntries([...stageSamples].map(([stage, values]) => [stage, { p50Ms: percentile(values, 0.5), p95Ms: percentile(values, 0.95) }])),
 	} };
 }
 

@@ -46,7 +46,9 @@ for (const fixture of fixtureCases) {
         discoveredFiles: reference.receipt.discoveredFiles, readFiles: reference.receipt.readFiles, bytesRead: reference.receipt.bytesRead, durationMs: reference.receipt.durationMs,
         omissions: reference.omissions.filter(group => !['package_scope', 'excerpt_limit', 'packet_limit'].includes(group.reason)),
       });
-      assert.deepEqual(candidate, reference);
+      const comparable = structuredClone(candidate);
+      delete comparable.receipt.stageDurationsMs;
+      assert.deepEqual(comparable, reference);
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }

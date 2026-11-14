@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { InspectionEngine } from '../../src/worker/engine.ts';
+import { MAX_PACKET_BYTES, packetByteLength } from '../../src/packet.ts';
+import { renderModelEvidence } from '../../src/session-model-evidence.ts';
 
 const execute = promisify(execFile);
 const gitEnvironment = {
@@ -50,6 +52,12 @@ test('recognizes an unborn Git repository and searches its untracked source', as
     assert.equal(packet.target.repository, 'git');
     assert.equal(packet.snapshot.revision, undefined);
     assert.ok(packet.excerpts.some((item) => item.path === 'untracked.ts' && item.text === 'export function unbornNeedle() {}\n'));
+    assert.deepEqual(Object.keys(packet.receipt.stageDurationsMs).sort(), ['directReads', 'discovery', 'finalSnapshot', 'retrievalRanking']);
+    assert.ok(Object.values(packet.receipt.stageDurationsMs).every(value => Number.isFinite(value) && value >= 0));
+    const modelText = renderModelEvidence(packet);
+    packet.receipt.stageDurationsMs.rootResolution = 1;
+    packet.receipt.stageDurationsMs.rendering = 2;
+    assert.equal(renderModelEvidence(packet), modelText);
   });
 });
 
@@ -65,6 +73,17 @@ test('reads dirty worktree content instead of staged index content', async () =>
     assert.equal(packet.target.repository, 'git');
     assert.ok(packet.excerpts.some((item) => item.path === 'src.ts' && item.text === 'export function worktreeNeedle() {}\n'));
     assert.ok(!packet.excerpts.some((item) => item.text.includes('stagedNeedle')));
+  });
+});
+
+test('retrieval ranking timing includes evidence packet construction', async () => {
+  await repository(async (root) => {
+    const lines = Array.from({ length: 800 }, (_, index) => `export function timingNeedle${index}() { return timingNeedle; }\n`).join('');
+    await writeFile(join(root, 'source.ts'), lines);
+    const packet = await inspect(root, 'timingNeedle');
+    assert.equal(packet.receipt.readFiles, 1);
+    assert.ok(packet.receipt.stageDurationsMs.retrievalRanking > 1);
+    assert.ok(packetByteLength(packet) <= MAX_PACKET_BYTES);
   });
 });
 

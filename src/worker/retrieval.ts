@@ -513,13 +513,14 @@ export function buildEvidencePacket(input: EvidenceInput): ResearchPacketV1 {
     snapshot: { ...(input.revision === undefined ? {} : { revision: input.revision }), id: input.snapshotId, validated: true },
     governingArtifacts: store.references('governing'), definitions: store.references('definition'), callers: store.references('caller'), imports: store.references('import'), tests: store.references('test'), configuration: store.references('configuration'), matches: store.references('match'),
     excerpts: store.excerpts, unknowns: [...new Set(unknowns)].filter(Boolean).sort(compareText).slice(0, MAX_UNKNOWNS), omissions: omissions.values(),
-    receipt: { packetId: hash(`${input.snapshotId}\0${input.query}\0${input.cwd}`), schemaVersion: 1, policyVersion: POLICY_VERSION, snapshotId: input.snapshotId, durationMs: Math.max(0, Math.floor(input.durationMs)), discoveredFiles: input.discoveredFiles, readFiles: input.readFiles, bytesRead: input.bytesRead, excerptCount: store.excerpts.length, omissionCount: omissions.total() },
+    receipt: { packetId: hash(`${input.snapshotId}\0${input.query}\0${input.cwd}`), schemaVersion: 1, policyVersion: POLICY_VERSION, snapshotId: input.snapshotId, durationMs: Math.max(0, Math.floor(input.durationMs)), discoveredFiles: input.discoveredFiles, readFiles: input.readFiles, bytesRead: input.bytesRead, excerptCount: store.excerpts.length, omissionCount: omissions.total(), ...(input.stageDurationsMs ? { stageDurationsMs: input.stageDurationsMs } : {}) },
   };
   retainReferences(packet);
   while (true) {
     packet.receipt.excerptCount = packet.excerpts.length;
     packet.receipt.omissionCount = packet.omissions.reduce((total, group) => total + group.count, 0);
-    if (packetBytes(packet) <= targetPacketBytes) return packet;
+    const { stageDurationsMs: _stageDurationsMs, ...evidenceReceipt } = packet.receipt;
+    if (packetBytes({ ...packet, receipt: evidenceReceipt }) <= targetPacketBytes) return packet;
     if (!packet.excerpts.length) throw new InspectContextError('packet_limit', `packet exceeds compact target of ${targetPacketBytes} bytes`);
     packet.excerpts.pop();
     retainReferences(packet);

@@ -236,6 +236,8 @@ export class InspectionEngine {
     const root = openRoot(request.root);
     try {
       const rootIdentity = descriptorMetadata(root);
+      const discoveryStarted = performance.now();
+      let directReadsMs = 0;
       const initial = await collectInventory(request.root, root, signal);
       const scope = nearestScope(root, cwd, initial);
       const terms = extractSearchTerms(query);
@@ -271,12 +273,13 @@ export class InspectionEngine {
         let after: FileMetadata;
         try {
           if (!sameMetadata(descriptorMetadata(descriptor), expected)) throw new InspectContextError('snapshot_changed', `file changed before read: ${entry.path}`);
+          const readStarted = performance.now();
           try { bytes = readBounded(descriptor); }
           catch (error) {
             if (error instanceof InspectContextError) throw error;
             omissions.add('read_error', 1, [entry.path]);
             return;
-          }
+          } finally { directReadsMs += performance.now() - readStarted; }
           after = descriptorMetadata(descriptor);
           if (!sameMetadata(after, expected) || BigInt(bytes.length) !== after.size) throw new InspectContextError('snapshot_changed', `file changed during read: ${entry.path}`);
         } finally { closeSync(descriptor); }
@@ -332,6 +335,8 @@ export class InspectionEngine {
         }
       }
       signal?.throwIfAborted();
+      const discoveryMs = Math.max(0, performance.now() - discoveryStarted - directReadsMs);
+      const finalSnapshotStarted = performance.now();
       let final: Inventory;
       try { final = await collectInventory(request.root, root, signal); }
       catch (error) { throw new InspectContextError('snapshot_changed', `final inventory: ${errorMessage(error)}`); }
@@ -347,7 +352,12 @@ export class InspectionEngine {
         if (error instanceof InspectContextError && error.code === 'snapshot_changed') throw error;
         throw new InspectContextError('snapshot_changed', `verify accepted snapshot: ${errorMessage(error)}`);
       }
-      return buildEvidencePacket({ query, cwd, repository: initial.kind, revision: initial.revision, snapshotId: initial.fingerprint, files, scope, discoveredFiles, readFiles, bytesRead, omissions: omissions.values(), durationMs: performance.now() - started });
+      const finalSnapshotMs = Math.max(0, performance.now() - finalSnapshotStarted);
+      const stageDurationsMs = { discovery: discoveryMs, directReads: directReadsMs, retrievalRanking: 0, finalSnapshot: finalSnapshotMs };
+      const retrievalStarted = performance.now();
+      const packet = buildEvidencePacket({ query, cwd, repository: initial.kind, revision: initial.revision, snapshotId: initial.fingerprint, files, scope, discoveredFiles, readFiles, bytesRead, omissions: omissions.values(), durationMs: performance.now() - started, stageDurationsMs });
+      stageDurationsMs.retrievalRanking = Math.max(0, performance.now() - retrievalStarted);
+      return packet;
     } finally { closeSync(root); }
   }
 }

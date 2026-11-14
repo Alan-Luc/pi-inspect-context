@@ -103,6 +103,14 @@ test("preserves the omission vocabulary and rejects invalid omission records", (
 	}
 });
 
+test("accepts bounded optional stage duration diagnostics and rejects invalid fields", () => {
+	const receipt = { ...packet().receipt, stageDurationsMs: { discovery: 1.25, directReads: 0 } };
+	assert.equal(Value.Check(RESEARCH_PACKET_V1_SCHEMA, { ...packet(), receipt }), true);
+	for (const stageDurationsMs of [{ discovery: -1 }, { discovery: "1" }, { unknown: 1 }, null]) {
+		assert.equal(Value.Check(RESEARCH_PACKET_V1_SCHEMA, { ...packet(), receipt: { ...packet().receipt, stageDurationsMs } }), false);
+	}
+});
+
 test("serializes compact no-match packets and rejects packets above the byte budget", () => {
 	const noMatch = packet();
 	noMatch.matches = [];

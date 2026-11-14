@@ -14,10 +14,16 @@ export function registerSessionInspectContext(pi: ExtensionAPI, options: Pick<In
     ...createInspectContextTool(),
     execute: async (_id: string, params: unknown, signal: AbortSignal | undefined, _update: unknown, ctx: ExtensionToolContext) => {
       const query = normalizeQuery(params);
+      const rootResolutionStarted = performance.now();
       const root = await resolveInspectionRoot(ctx.cwd, signal);
       const cwd = relative(root, realpathSync(ctx.cwd)).split(sep).join('/') || '.';
+      const rootResolutionMs = Math.max(0, performance.now() - rootResolutionStarted);
       const packet = await session.run({ root, query, cwd }, { signal });
-      return { content: [{ type: 'text' as const, text: renderModelEvidence(packet) }], details: packet, structuredContent: packet };
+      packet.receipt.stageDurationsMs = { ...packet.receipt.stageDurationsMs, rootResolution: rootResolutionMs };
+      const renderingStarted = performance.now();
+      const text = renderModelEvidence(packet);
+      packet.receipt.stageDurationsMs.rendering = Math.max(0, performance.now() - renderingStarted);
+      return { content: [{ type: 'text' as const, text }], details: packet, structuredContent: packet };
     },
   });
 }

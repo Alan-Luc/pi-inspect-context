@@ -153,6 +153,54 @@ test("CLI retains failed samples and exits nonzero without treating failures as 
 	}
 });
 
+test("aggregates available stage timings per case and summary without counting failed calls", async () => {
+	const scratch = await mkdtemp(join(tmpdir(), "benchmark-stage-durations-"));
+	try {
+		const root = join(scratch, "repository");
+		const adapterRoot = join(scratch, "adapter");
+		await mkdir(root);
+		await mkdir(join(adapterRoot, "src"), { recursive: true });
+		await writeFile(join(adapterRoot, "src/adapter.ts"), `export function createInspectContextTool() {
+			let calls = 0;
+			return { execute: async () => {
+				calls++;
+				if (calls === 3) throw new Error("planned failure");
+				const durations = calls === 1 ? {rootResolution:999} : calls === 2
+					? {rootResolution:10, discovery:20} : {rootResolution:30, directReads:40};
+				return {details:{excerpts:[],receipt:{stageDurationsMs:durations}},content:[{type:"text",text:"ok"}]};
+			} };
+		}`);
+		const config = join(scratch, "config.json");
+		await writeFile(config, JSON.stringify({cases:[{id:"timed",root,cwd:".",query:"symbol",expected:[]}]}));
+		const report = await runBenchmark({config,adapterRoot,samples:10});
+		assert.deepEqual(report.cases[0].stageDurationsMs, {
+			rootResolution:{p50Ms:30,p95Ms:30}, discovery:{p50Ms:20,p95Ms:20}, directReads:{p50Ms:40,p95Ms:40},
+		});
+		assert.deepEqual(report.summary.stageDurationsMs, report.cases[0].stageDurationsMs);
+		assert.equal(report.cases[0].failureCount, 1);
+	} finally {
+		await rm(scratch,{recursive:true,force:true});
+	}
+});
+
+test("omits stage timings for legacy adapters", async () => {
+	const scratch = await mkdtemp(join(tmpdir(), "benchmark-legacy-stages-"));
+	try {
+		const root = join(scratch, "repository");
+		const adapterRoot = join(scratch, "adapter");
+		await mkdir(root);
+		await mkdir(join(adapterRoot, "src"), { recursive: true });
+		await writeFile(join(adapterRoot, "src/adapter.ts"), `export function createInspectContextTool() { return { execute: async () => ({details:{excerpts:[]},content:[{type:"text",text:"ok"}]}) }; }`);
+		const config = join(scratch, "config.json");
+		await writeFile(config, JSON.stringify({cases:[{id:"legacy",root,cwd:".",query:"symbol",expected:[]}]}));
+		const report = await runBenchmark({config,adapterRoot,samples:10});
+		assert.deepEqual(report.cases[0].stageDurationsMs, {});
+		assert.deepEqual(report.summary.stageDurationsMs, {});
+	} finally {
+		await rm(scratch,{recursive:true,force:true});
+	}
+});
+
 test("byte metrics measure serialized packet and exact model-facing text", () => {
 	const packet = { message: "é" };
 	const modelContent = `tool says ${JSON.stringify(packet)}`;

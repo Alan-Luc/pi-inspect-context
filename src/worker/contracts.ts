@@ -37,4 +37,5 @@ export type EvidenceInput = {
   bytesRead: number;
   omissions: OmissionGroup[];
   durationMs: number;
+  stageDurationsMs?: Partial<Record<'discovery' | 'directReads' | 'retrievalRanking' | 'finalSnapshot', number>>;
 };

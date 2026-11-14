@@ -23,7 +23,11 @@ for (const fixture of fixtureCases) {
       await execute('git', ['add', '-A'], { cwd: scratch, env: environment });
       const reference = await runWorker({ root: scratch, cwd: fixture.cwd, query: fixture.query }, { workerPath: join(frozen, 'bin/inspect-context') });
       const candidate = await engine.inspect({ version: 1, root: scratch, cwd: fixture.cwd, query: fixture.query }, { version: 1, root: scratch });
-      assert.deepEqual({ ...candidate, receipt: { ...candidate.receipt, durationMs: 0 } }, { ...reference, receipt: { ...reference.receipt, durationMs: 0 } });
+      const comparable = packet => {
+        const { stageDurationsMs: _stageDurationsMs, ...receipt } = packet.receipt;
+        return { ...packet, receipt: { ...receipt, durationMs: 0 } };
+      };
+      assert.deepEqual(comparable(candidate), comparable(reference));
     } finally {
       await engine.close();
       await rm(scratch, { recursive: true, force: true });

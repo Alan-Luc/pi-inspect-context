@@ -73,6 +73,18 @@ const OmissionGroupSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const StageDurationsSchema = Type.Object(
+	{
+		rootResolution: Type.Optional(Type.Number({ minimum: 0 })),
+		discovery: Type.Optional(Type.Number({ minimum: 0 })),
+		directReads: Type.Optional(Type.Number({ minimum: 0 })),
+		retrievalRanking: Type.Optional(Type.Number({ minimum: 0 })),
+		finalSnapshot: Type.Optional(Type.Number({ minimum: 0 })),
+		rendering: Type.Optional(Type.Number({ minimum: 0 })),
+	},
+	{ additionalProperties: false },
+);
+
 const ReceiptSchema = Type.Object(
 	{
 		packetId: Type.String({ minLength: 1 }),
@@ -85,6 +97,7 @@ const ReceiptSchema = Type.Object(
 		bytesRead: Type.Integer({ minimum: 0 }),
 		excerptCount: Type.Integer({ minimum: 0 }),
 		omissionCount: Type.Integer({ minimum: 0 }),
+		stageDurationsMs: Type.Optional(StageDurationsSchema),
 	},
 	{ additionalProperties: false },
 );
