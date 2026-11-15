@@ -33,6 +33,9 @@ test('normal npm installation and declared default execute without Go, Bun, peer
     for (const binary of ['go', 'bun']) assert.equal(spawnSync(binary, ['--version'], { env: runtimeEnv }).error?.code, 'ENOENT');
     const npmPath = (process.env.PATH ?? '').split(delimiter).map(directory => join(directory, 'npm')).find(path => existsSync(path));
     assert.ok(npmPath, 'npm executable is a test prerequisite');
+    const cachePrimer = join(scratch, 'cache-primer');
+    execute(process.execPath, [realpathSync(npmPath), 'install', '--prefix', cachePrimer, '--omit=dev', '--omit=peer', '--legacy-peer-deps', '--no-audit', '--no-fund', join(scratch, packed.filename)], scratch, runtimeEnv);
+    rmSync(cachePrimer, { recursive: true, force: true });
     execute(process.execPath, [realpathSync(npmPath), 'install', '--prefix', prefix, '--offline', '--omit=dev', '--omit=peer', '--legacy-peer-deps', '--no-audit', '--no-fund', join(scratch, packed.filename)], scratch, runtimeEnv);
     const installed = join(prefix, 'node_modules/pi-inspect-context');
     assert.match(readFileSync(join(installed, 'dist/worker.mjs'), 'utf8'), /import\("@ff-labs\/fff-node"\)/);
