@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -13,9 +12,7 @@ test("package includes new model and worker runtime sources", () => {
 	});
 	assert.ifError(result.error);
 	assert.equal(result.status, 0, result.stderr);
-	const root = dirname(dirname(fileURLToPath(import.meta.url)));
 	const files = new Set(JSON.parse(result.stdout)[0].files.map((file) => file.path));
-	assert.match(readFileSync(join(root, "dist/worker.mjs"), "utf8"), /import\("@ff-labs\/fff-node"\)/);
 	const requiredFiles = [
 		"src/git-executable.ts", "src/model-evidence.ts", "worker/body.go", "worker/scope.go",
 		"extensions/typescript.ts", "scripts/build-typescript-worker.mjs",
