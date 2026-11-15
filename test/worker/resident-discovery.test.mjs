@@ -256,6 +256,7 @@ test('rejects a tracked source mutation after real native nomination', async () 
   try {
     const ready = await created.value.waitForIndexReady(5000);
     assert.equal(ready.ok && ready.value, true);
+    for (let attempt = 0; attempt < 100 && !created.value.getScanProgress().value?.isWatcherReady; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(created.value.getScanProgress().value?.isWatcherReady, true);
     const nativeMultiGrep = created.value.multiGrep.bind(created.value);
     created.value.multiGrep = options => {

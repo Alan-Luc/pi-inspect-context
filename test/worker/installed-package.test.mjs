@@ -28,7 +28,8 @@ test('normal npm installation and declared default execute without Go, Bun, peer
     const binaries = join(scratch, 'bin');
     mkdirSync(binaries);
     symlinkSync(process.execPath, join(binaries, 'node'));
-    const runtimeEnv = { ...process.env, PATH: `${binaries}:/usr/bin:/bin` };
+    symlinkSync('/bin/sh', join(binaries, 'sh'));
+    const runtimeEnv = { ...process.env, PATH: binaries };
     for (const binary of ['go', 'bun']) assert.equal(spawnSync(binary, ['--version'], { env: runtimeEnv }).error?.code, 'ENOENT');
     const npmPath = (process.env.PATH ?? '').split(delimiter).map(directory => join(directory, 'npm')).find(path => existsSync(path));
     assert.ok(npmPath, 'npm executable is a test prerequisite');
