@@ -34,6 +34,8 @@ test('normal npm installation and declared default execute without Go, Bun, peer
     assert.ok(npmPath, 'npm executable is a test prerequisite');
     execute(process.execPath, [realpathSync(npmPath), 'install', '--prefix', prefix, '--offline', '--omit=dev', '--omit=peer', '--legacy-peer-deps', '--no-audit', '--no-fund', join(scratch, packed.filename)], scratch, runtimeEnv);
     const installed = join(prefix, 'node_modules/pi-inspect-context');
+    assert.ok(existsSync(join(prefix, 'node_modules/@ff-labs/fff-node')));
+    assert.equal(existsSync(join(prefix, 'node_modules/@earendil-works/pi-coding-agent')), false);
     assert.equal(existsSync(join(prefix, 'node_modules/typebox')), false);
     assert.equal(existsSync(join(installed, 'node_modules/typebox')), false);
     assert.equal(existsSync(join(installed, 'bin/inspect-context')), false);
