@@ -303,7 +303,8 @@ test('uses fresh dirty and untracked source ahead of stale native nominations', 
   try {
     await withGitSpy(async calls => {
       const packet = await engine.inspect({ version: 1, root, query: 'dirtyFreshNeedle untrackedFreshNeedle' }, { version: 1, root });
-      assert.ok(calls.some(args => args.includes('grep')));
+      assert.equal(calls.filter(args => args.includes('grep')).length, 0);
+      assert.equal(harness.calls.searched.length, 1);
       assert.equal(packet.receipt.readFiles, 2);
       assert.equal(packet.receipt.bytesRead, Buffer.byteLength(dirty) + Buffer.byteLength(untracked));
       assert.ok(packet.excerpts.some(item => item.path === 'src/needle.ts' && item.text === dirty));
