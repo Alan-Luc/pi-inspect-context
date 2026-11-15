@@ -1,32 +1,20 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { lstatSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, parse, relative, resolve, sep, posix } from "node:path";
-import { fileURLToPath } from "node:url";
-import { tmpdir } from "node:os";
+import { isAbsolute, join, parse, relative, resolve, sep, posix } from "node:path";
 import { Value } from "typebox/value";
-import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { renderModelEvidence } from "./model-evidence.ts";
 import { resolveGitExecutable } from "./git-executable.ts";
 import {
-	AUTHORIZATION_MANIFEST_SCHEMA,
 	INSPECT_CONTEXT_PARAMETERS,
 	MAX_AGGREGATE_READ_BYTES,
 	MAX_DISCOVERED_FILES,
 	MAX_EXCERPT_LINES,
 	MAX_PACKET_BYTES,
 	RESEARCH_PACKET_V1_SCHEMA,
-	WORKER_PROTOCOL_VERSION,
-	WORKER_REQUEST_SCHEMA,
 	InspectContextError,
-	normalizeQuery,
 	packetByteLength,
 	type ResearchPacketV1,
-	type WorkerRequest,
 } from "./packet.ts";
 
-const MAX_REQUEST_BYTES = 64 * 1024;
-const MAX_OUTPUT_BYTES = MAX_PACKET_BYTES;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_GIT_BYTES = 4 * 1024;
 const DEFAULT_TIMEOUT_MS = 2_000;
@@ -34,19 +22,9 @@ const KILL_GRACE_MS = 250;
 const POSIX_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin";
 let gitExecutable: string | undefined;
 
-export type InspectionTarget = {
-	root: string;
-	query: string;
-	cwd?: string;
-};
-
-export type WorkerRunOptions = {
-	signal?: AbortSignal;
+export type InspectContextToolOptions = {
 	timeoutMs?: number;
-	workerPath?: string;
 };
-
-export type InspectContextToolOptions = Omit<WorkerRunOptions, "signal">;
 
 type ProcessResult = {
 	stdout: Buffer;
@@ -58,7 +36,6 @@ type ProcessResult = {
 type ProcessOptions = {
 	cwd: string;
 	environment: NodeJS.ProcessEnv;
-	input?: string;
 	label: string;
 	maxStdoutBytes: number;
 	maxStderrBytes: number;
@@ -207,9 +184,6 @@ async function cleanupProcessGroup(child: ChildProcessWithoutNullStreams): Promi
 
 async function runBoundedProcess(executable: string, args: readonly string[], options: ProcessOptions): Promise<ProcessResult> {
 	options.signal?.throwIfAborted();
-	if (options.input !== undefined && Buffer.byteLength(options.input, "utf8") > MAX_REQUEST_BYTES) {
-		fail("request_limit", `${options.label} request exceeds ${MAX_REQUEST_BYTES} bytes`);
-	}
 	return await new Promise<ProcessResult>((resolveProcess, rejectProcess) => {
 		let child: ChildProcessWithoutNullStreams;
 		try {
@@ -233,7 +207,6 @@ async function runBoundedProcess(executable: string, args: readonly string[], op
 		let closeSeen = false;
 		let closeCode: number | null = null;
 		let closeSignal: NodeJS.Signals | null = null;
-		let inputDone = options.input === undefined;
 		let settled = false;
 		let cleanupDone = true;
 		let cleanupPromise: Promise<void> | undefined;
@@ -241,7 +214,7 @@ async function runBoundedProcess(executable: string, args: readonly string[], op
 		let timeout: ReturnType<typeof setTimeout> | undefined;
 
 		const finish = (): void => {
-			if (settled || !closeSeen || !inputDone || !cleanupDone) return;
+			if (settled || !closeSeen || !cleanupDone) return;
 			settled = true;
 			if (timeout !== undefined) clearTimeout(timeout);
 			options.signal?.removeEventListener("abort", abortHandler);
@@ -255,7 +228,6 @@ async function runBoundedProcess(executable: string, args: readonly string[], op
 		const terminate = (error: Error): void => {
 			if (settled) return;
 			terminalError ??= error;
-			inputDone = true;
 			if (cleanupPromise === undefined) {
 				cleanupDone = false;
 				cleanupPromise = cleanupProcessGroup(child)
@@ -296,7 +268,6 @@ async function runBoundedProcess(executable: string, args: readonly string[], op
 		child.stdin.once("error", (error: Error) => terminate(new Error(`${options.label} stdin failed: ${error.message}`)));
 		child.once("error", (error: Error) => {
 			terminalError ??= new Error(`${options.label} could not start: ${error.message}`);
-			inputDone = true;
 			closeSeen = true;
 			finish();
 		});
@@ -312,17 +283,7 @@ async function runBoundedProcess(executable: string, args: readonly string[], op
 		}
 		timeout = setTimeout(() => terminate(new Error(`${options.label} timed out after ${options.timeoutMs}ms`)), options.timeoutMs);
 		try {
-			if (options.input === undefined) {
-				child.stdin.end(() => {
-					inputDone = true;
-					finish();
-				});
-			} else {
-				child.stdin.end(options.input, () => {
-					inputDone = true;
-					finish();
-				});
-			}
+			child.stdin.end();
 		} catch (error) {
 			terminate(new Error(`${options.label} stdin write failed: ${errorMessage(error)}`));
 		}
@@ -369,58 +330,6 @@ export async function resolveInspectionRoot(cwd: string, signal?: AbortSignal): 
 	const root = validateDirectory(rootText, "Git repository root");
 	if (!contained(root, verifiedCwd)) fail("invalid_root", `Git repository root does not contain ctx.cwd: ${root}`);
 	return root;
-}
-
-function packagedWorkerPath(): string {
-	assertSupportedPlatform();
-	return validateExecutable(join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "inspect-context"), "packaged inspect_context worker");
-}
-
-function validateExecutable(pathValue: string, label: string): string {
-	const path = resolve(pathValue);
-	let metadata;
-	try {
-		metadata = lstatSync(path);
-	} catch (error) {
-		fail("worker_unavailable", `${label} is unavailable at ${path}: ${errorMessage(error)}`);
-	}
-	if (!metadata.isFile() || metadata.isSymbolicLink()) fail("worker_unavailable", `${label} must be a regular non-symlink file: ${path}`);
-	if ((metadata.mode & 0o111) === 0) fail("worker_unavailable", `${label} is not executable: ${path}`);
-	return path;
-}
-
-async function createRunRoot(): Promise<string> {
-	const temporary = await mkdtemp(join(tmpdir(), "pi-inspect-context-"));
-	try {
-		await chmod(temporary, 0o700);
-		const metadata = await lstat(temporary);
-		if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o077) !== 0) {
-			throw new Error("temporary run directory must be a mode-0700 real directory");
-		}
-		const canonical = await realpath(temporary);
-		await mkdir(join(canonical, "home"), { mode: 0o700 });
-		await chmod(join(canonical, "home"), 0o700);
-		return canonical;
-	} catch (error) {
-		await rm(temporary, { recursive: true, force: true });
-		throw new Error(`temporary inspect_context directory could not be prepared: ${errorMessage(error)}`);
-	}
-}
-
-function workerEnvironment(runRoot: string, manifestPath: string): NodeJS.ProcessEnv {
-	return {
-		PATH: POSIX_PATH,
-		HOME: join(runRoot, "home"),
-		LANG: "C",
-		LC_ALL: "C",
-		GIT_CONFIG_GLOBAL: "/dev/null",
-		GIT_CONFIG_SYSTEM: "/dev/null",
-		GIT_CONFIG_NOSYSTEM: "1",
-		GIT_TERMINAL_PROMPT: "0",
-		GIT_PAGER: "cat",
-		GIT_OPTIONAL_LOCKS: "0",
-		INSPECT_CONTEXT_MANIFEST: manifestPath,
-	};
 }
 
 function schemaPacket(value: unknown): value is ResearchPacketV1 {
@@ -517,94 +426,12 @@ export function parseWorkerResponse(output: Buffer, expectedQuery: string): Rese
 	return value;
 }
 
-function workerFailure(result: ProcessResult): never {
-	const status = result.signal === null ? `exit ${result.code ?? "unknown"}` : `signal ${result.signal}`;
-	fail("worker_failed", `inspect_context worker failed with ${status}: ${diagnostic(result.stderr)}`);
-}
-
-export async function runWorker(target: InspectionTarget, options: WorkerRunOptions = {}): Promise<ResearchPacketV1> {
-	const query = normalizeQuery({ query: target.query });
-	assertSupportedPlatform();
-	options.signal?.throwIfAborted();
-	const root = validateDirectory(target.root, "inspection root");
-	const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) fail("invalid_options", "worker timeout must be a positive integer");
-	const workerPath = options.workerPath === undefined ? packagedWorkerPath() : validateExecutable(options.workerPath, "inspect_context worker");
-	const runRoot = await createRunRoot();
-	let operationError: unknown;
-	try {
-		const manifestPath = join(runRoot, "inspect-context-manifest.json");
-		const manifest = { version: WORKER_PROTOCOL_VERSION, root } as const;
-		if (!Value.Check(AUTHORIZATION_MANIFEST_SCHEMA, manifest)) fail("authorization", "generated authorization manifest failed its schema");
-		await writeFile(manifestPath, JSON.stringify(manifest), { encoding: "utf8", mode: 0o600 });
-		await chmod(manifestPath, 0o600);
-		const manifestMetadata = await lstat(manifestPath);
-		if (!manifestMetadata.isFile() || manifestMetadata.isSymbolicLink() || (manifestMetadata.mode & 0o077) !== 0) {
-			fail("authorization", "authorization manifest must be a mode-0600 regular file");
-		}
-		const request: WorkerRequest = { version: WORKER_PROTOCOL_VERSION, root, query, ...(target.cwd === undefined ? {} : { cwd: target.cwd }) };
-		if (!Value.Check(WORKER_REQUEST_SCHEMA, request)) fail("request_limit", "generated worker request failed its schema");
-		const input = JSON.stringify(request);
-		if (Buffer.byteLength(input, "utf8") > MAX_REQUEST_BYTES) fail("request_limit", `worker request exceeds ${MAX_REQUEST_BYTES} bytes`);
-		const result = await runBoundedProcess(workerPath, [], {
-			cwd: runRoot,
-			environment: workerEnvironment(runRoot, manifestPath),
-			input,
-			label: "inspect_context worker",
-			maxStdoutBytes: MAX_OUTPUT_BYTES,
-			maxStderrBytes: MAX_STDERR_BYTES,
-			timeoutMs,
-			signal: options.signal,
-		});
-		if (result.code !== 0 || result.signal !== null) workerFailure(result);
-		return parseWorkerResponse(result.stdout, query);
-	} catch (error) {
-		operationError = error;
-		throw error;
-	} finally {
-		try {
-			await rm(runRoot, { recursive: true, force: true });
-		} catch (cleanupError) {
-			const message = `temporary inspect_context state cleanup failed: ${errorMessage(cleanupError)}`;
-			if (operationError === undefined) throw new Error(message);
-			throw new Error(`${errorMessage(operationError)}; ${message}`);
-		}
-	}
-}
-
-export async function inspectContext(
-	ctx: Pick<ExtensionToolContext, "cwd">,
-	params: unknown,
-	options: WorkerRunOptions = {},
-): Promise<ResearchPacketV1> {
-	const query = normalizeQuery(params);
-	const root = await resolveInspectionRoot(ctx.cwd, options.signal);
-	const cwd = relative(root, validateDirectory(ctx.cwd, "ctx.cwd")).split(sep).join("/") || ".";
-	return runWorker({ root, query, cwd }, options);
-}
-
-export function createInspectContextTool(options: InspectContextToolOptions = {}) {
-	return {
-		name: "inspect_context",
-		label: "Inspect context",
-		description: "Find bounded lexical repository context for one short symbol, route, config key, path fragment, or concept query. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Results are read-only discovery aids: zero, weak, or materially omitted evidence is not proof of absence; use ordinary repository investigation when needed. Do not reread bodyComplete=true bodies; investigate only missing context. Git-index search may miss edits hidden by assume-unchanged and Unicode case variants of ASCII queries in clean tracked files.",
-		parameters: INSPECT_CONTEXT_PARAMETERS,
-		outputSchema: RESEARCH_PACKET_V1_SCHEMA,
-		executionMode: "sequential" as const,
-		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-		execute: async (
-			_toolCallId: string,
-			params: unknown,
-			signal: AbortSignal | undefined,
-			_onUpdate: unknown,
-			ctx: ExtensionToolContext,
-		) => {
-			const packet = await inspectContext(ctx, params, { ...options, signal });
-			return {
-				content: [{ type: "text" as const, text: renderModelEvidence(packet) }],
-				details: packet,
-				structuredContent: packet,
-			};
-		},
-	};
-}
+export const inspectContextToolDefinition = {
+	name: "inspect_context",
+	label: "Inspect context",
+	description: "Find bounded lexical repository context for one short symbol, route, config key, path fragment, or concept query. Exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. Results are read-only discovery aids: zero, weak, or materially omitted evidence is not proof of absence; use ordinary repository investigation when needed. Do not reread bodyComplete=true bodies; investigate only missing context. Git-index search may miss edits hidden by assume-unchanged and Unicode case variants of ASCII queries in clean tracked files.",
+	parameters: INSPECT_CONTEXT_PARAMETERS,
+	outputSchema: RESEARCH_PACKET_V1_SCHEMA,
+	executionMode: "sequential" as const,
+	annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+};

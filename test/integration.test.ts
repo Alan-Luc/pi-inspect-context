@@ -6,10 +6,14 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { registerInspectContext } from "../extensions/index.ts";
-import { createInspectContextTool, runWorker } from "../src/adapter.ts";
+import { fileURLToPath } from "node:url";
+import { invokeGoOracle } from "./worker/go-oracle.mjs";
 import { POLICY_VERSION } from "../src/packet.ts";
 
+type RegisteredTool = Parameters<Parameters<typeof registerInspectContext>[0]["registerTool"]>[0];
+
 const execFileAsync = promisify(execFile);
+const goOraclePath = fileURLToPath(new URL("../bin/inspect-context", import.meta.url));
 
 test("the registered tool executes the packaged session worker without executing repository text", async () => {
 	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-integration-"));
@@ -26,7 +30,7 @@ test("the registered tool executes the packaged session worker without executing
 		await execFileAsync("git", ["init", "--quiet"], { cwd: root });
 		await execFileAsync("git", ["add", "--", "src/feature.go"], { cwd: root });
 
-		const registrations: Array<ReturnType<typeof createInspectContextTool>> = [];
+		const registrations: RegisteredTool[] = [];
 		registerInspectContext({ registerTool(tool) { registrations.push(tool); }, on(_event, handler) { shutdown = handler; } });
 		const result = await registrations[0].execute(
 			"integration-call",
@@ -60,14 +64,14 @@ test("the registered tool executes the packaged session worker without executing
 	}
 });
 
-test("the TypeScript adapter and Go worker preserve the v10 policy and v1 packet contract", async () => {
+test("the trusted Go oracle preserves the v10 policy and v1 packet contract", async () => {
 	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v10-integration-"));
 	try {
 		await mkdir(join(root, "src"));
 		await writeFile(join(root, "src", "health.ts"), "export const statusRoute = '/health/ready';\nexport function registerStatusEndpoint() {}\n", "utf8");
 		await writeFile(join(root, "src", "noise.ts"), "export function unrelated() {}\n", "utf8");
 
-		const packet = await runWorker({ root, query: "status endpoint route" });
+		const packet = invokeGoOracle(goOraclePath, { root, query: "status endpoint route" });
 		assert.equal(packet.version, 1);
 		assert.equal(packet.receipt.schemaVersion, 1);
 		assert.equal(packet.receipt.policyVersion, POLICY_VERSION);
@@ -81,11 +85,14 @@ test("the TypeScript adapter and Go worker preserve the v10 policy and v1 packet
 
 test("package diagnostics preserve the ten-percent model byte guard", async (context) => {
 	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-byte-guard-"));
+	let shutdown: (() => Promise<void>) | undefined;
 	try {
 		await cp(new URL("../bench/fixtures/typescript-methods/", import.meta.url), root, { recursive: true });
 		await execFileAsync("git", ["init", "--quiet"], { cwd: root });
 		await execFileAsync("git", ["add", "-A"], { cwd: root });
-		const tool = createInspectContextTool();
+		const registrations: RegisteredTool[] = [];
+		registerInspectContext({ registerTool(tool) { registrations.push(tool); }, on(_event, handler) { shutdown = handler; } });
+		const tool = registrations[0];
 		for (const { query, baselineBytes } of [
 			{ query: "lookupAccount", baselineBytes: 1683 },
 			{ query: "formatAccount", baselineBytes: 1375 },
@@ -97,17 +104,18 @@ test("package diagnostics preserve the ten-percent model byte guard", async (con
 			});
 		}
 	} finally {
+		if (shutdown) await shutdown();
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("the Go worker returns a compact actionable packet for an impossible query", async () => {
+test("the Go oracle returns a compact actionable packet for an impossible query", async () => {
 	const root = await mkdtemp(join(await realpath(tmpdir()), "pi-inspect-context-v10-no-match-"));
 	try {
 		await mkdir(join(root, "src"));
 		await writeFile(join(root, "src", "health.ts"), "export const statusRoute = '/health/ready';\n", "utf8");
 
-		const packet = await runWorker({ root, query: "impossible-lexeme-9f3a2c" });
+		const packet = invokeGoOracle(goOraclePath, { root, query: "impossible-lexeme-9f3a2c" });
 		assert.equal(packet.excerpts.length, 0);
 		assert.equal(packet.governingArtifacts.length, 0);
 		assert.deepEqual(packet.unknowns, ["No lexical matches; retry with an exact symbol, route, config key, or path fragment."]);

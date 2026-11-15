@@ -18,6 +18,17 @@ function validPacket(query = 'needle') {
       durationMs: 0, discoveredFiles: 0, readFiles: 0, bytesRead: 0, excerptCount: 0, omissionCount: 0 },
   };
 }
+function packetWithEvidence(query = 'needle') {
+  const packet = validPacket(query);
+  const text = 'const needle = 1;';
+  packet.matches.push({ excerptId: 'e1', path: 'src/a.ts', startLine: 1, endLine: 1, confidence: 'observed', reason: 'literal match' });
+  packet.excerpts.push({ id: 'e1', path: 'src/a.ts', startLine: 1, endLine: 1, kind: 'match', text, bodyComplete: false });
+  packet.receipt.discoveredFiles = 1;
+  packet.receipt.readFiles = 1;
+  packet.receipt.bytesRead = Buffer.byteLength(text);
+  packet.receipt.excerptCount = 1;
+  return packet;
+}
 async function waitFor(predicate) {
   const deadline = Date.now() + 3000;
   while (!predicate()) {
@@ -76,12 +87,46 @@ test('rejects closed sessions before allocating resources', async () => {
   assert.equal(session.pid, undefined);
 });
 
+test('forwards only the authorized root-relative cwd with a private manifest', async () => {
+  const f = fixture();
+  const nested = join(f.root, 'src', 'nested');
+  mkdirSync(nested, { recursive: true });
+  const probe = join(f.directory, 'request.json');
+  const response = packetWithEvidence();
+  const session = new PersistentWorkerSession({ workerPath: script(f, `
+    import fs from 'node:fs';
+    process.stdin.once('data', chunk => {
+      const request = JSON.parse(chunk.toString('utf8').trim());
+      const manifest = JSON.parse(fs.readFileSync(process.env.INSPECT_CONTEXT_MANIFEST, 'utf8'));
+      fs.writeFileSync(${JSON.stringify(probe)}, JSON.stringify({request, manifest,
+        mode: fs.statSync(process.env.INSPECT_CONTEXT_MANIFEST).mode & 0o777}));
+      const packet = ${JSON.stringify(response)};
+      packet.target.query = request.query;
+      process.stdout.write(JSON.stringify(packet) + '\\n');
+    });
+  `) });
+  try {
+    const packet = await session.run({ root: f.root, cwd: 'src/nested', query: 'e\u0301' });
+    const details = JSON.parse(readFileSync(probe, 'utf8'));
+    assert.equal(packet.target.query, 'é');
+    assert.deepEqual(details.request, { version: 1, root: f.root, query: 'é', cwd: 'src/nested' });
+    assert.deepEqual(details.manifest, { version: 1, root: f.root });
+    assert.equal(details.mode, 0o600);
+  } finally {
+    await session.close();
+    rmSync(f.directory, { recursive: true, force: true });
+  }
+});
+
 for (const [name, source, expected] of [
   ['malformed', `process.stdout.write('{\\n');`, /malformed/],
   ['extra replies', `process.stdout.write(${JSON.stringify(JSON.stringify(validPacket()) + '\n{}\n')});`, /extra|unsolicited/],
   ['stdout bound', `process.stdout.write('x'.repeat(${MAX_PACKET_BYTES + 2}));`, /stdout.*bound/],
   ['stderr bound', `process.stderr.write('x'.repeat(65537));`, /stderr.*bound/],
   ['query mismatch', `process.stdout.write(${JSON.stringify(JSON.stringify(validPacket('other')) + '\n')});`, /query/],
+  ['unsafe path', `const packet=${JSON.stringify(packetWithEvidence())};packet.excerpts[0].path='../outside';process.stdout.write(JSON.stringify(packet)+'\\n');`, /path/],
+  ['broken reference', `const packet=${JSON.stringify(packetWithEvidence())};packet.matches[0].path='src/other.ts';process.stdout.write(JSON.stringify(packet)+'\\n');`, /match|excerpt/],
+  ['invalid counters', `const packet=${JSON.stringify(packetWithEvidence())};packet.receipt.readFiles=2;process.stdout.write(JSON.stringify(packet)+'\\n');`, /counter/],
   ['worker crash', `process.stderr.write('deliberate crash');process.exit(7);`, /exit 7.*deliberate crash/],
 ]) {
   test(`rejects ${name}, kills the process and removes private state`, async () => {
@@ -137,6 +182,18 @@ for (const ending of ['timeout', 'abort', 'close']) {
     } finally { await session.close(); rmSync(f.directory, { recursive: true, force: true }); }
   });
 }
+
+test('rejects a worker executable symlink before starting a process', async () => {
+  const f = fixture();
+  const link = join(f.directory, 'worker-link.mjs');
+  const session = new PersistentWorkerSession({ workerPath: link });
+  try {
+    const realWorker = script(f, `process.stdin.once('data',()=>process.stdout.write(${JSON.stringify(JSON.stringify(validPacket()) + '\\n')}));`);
+    fs.symlinkSync(realWorker, link);
+    await assert.rejects(session.run({ root: f.root, query: 'needle' }), /regular non-symlink/i);
+    assert.equal(session.pid, undefined);
+  } finally { await session.close(); rmSync(f.directory, { recursive: true, force: true }); }
+});
 
 test('restarts after a failed worker without reusing poisoned response bytes', async () => {
   const f = fixture();

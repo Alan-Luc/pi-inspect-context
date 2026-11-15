@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { fixtureCases } from '../../bench/inspect-context.mjs';
-import { runWorker } from '../../src/adapter.ts';
+import { invokeGoOracle } from './go-oracle.mjs';
 import { InspectionEngine } from '../../src/worker/engine.ts';
 
 const frozen = fileURLToPath(new URL('../..', import.meta.url));
@@ -21,7 +21,7 @@ for (const fixture of fixtureCases) {
       await cp(join(frozen, 'bench/fixtures', fixture.root), scratch, { recursive: true });
       await execute('git', ['init', '--quiet'], { cwd: scratch, env: environment });
       await execute('git', ['add', '-A'], { cwd: scratch, env: environment });
-      const reference = await runWorker({ root: scratch, cwd: fixture.cwd, query: fixture.query }, { workerPath: join(frozen, 'bin/inspect-context') });
+      const reference = invokeGoOracle(join(frozen, 'bin/inspect-context'), { root: scratch, cwd: fixture.cwd, query: fixture.query });
       const candidate = await engine.inspect({ version: 1, root: scratch, cwd: fixture.cwd, query: fixture.query }, { version: 1, root: scratch });
       const comparable = packet => {
         const { stageDurationsMs: _stageDurationsMs, ...receipt } = packet.receipt;

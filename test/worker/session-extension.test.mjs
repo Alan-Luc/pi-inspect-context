@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { registerInspectContext } from '../../extensions/index.ts';
-import { createInspectContextTool } from '../../src/adapter.ts';
+import { inspectContextToolDefinition } from '../../src/adapter.ts';
 
 function registration(options) {
   const handlers = new Map();
@@ -55,9 +55,8 @@ test('registered tool owns lazy resources, returns exact fresh evidence, and rel
   try {
     registered = registration();
     assert.equal(spawns.length, 0);
-    const ordinary = createInspectContextTool();
     for (const key of ['name', 'description', 'parameters', 'outputSchema', 'executionMode', 'annotations']) {
-      assert.deepEqual(registered.tool[key], ordinary[key]);
+      assert.deepEqual(registered.tool[key], inspectContextToolDefinition[key]);
     }
     await assert.rejects(registered.tool.execute('bad', { query: '' }, undefined, undefined, { cwd: '/does-not-exist' }), /query/);
     assert.equal(spawns.length, 0);

@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { fixtureCases } from '../../bench/inspect-context.mjs';
-import { runWorker } from '../../src/adapter.ts';
+import { invokeGoOracle } from './go-oracle.mjs';
 import { buildEvidencePacket, sourceLines, exclusionReason } from '../../src/worker/retrieval.ts';
 
 const frozen = fileURLToPath(new URL('../..', import.meta.url));
@@ -39,7 +39,7 @@ for (const fixture of fixtureCases) {
       const files = await filesIn(scratch);
       await execute('git', ['init', '--quiet'], { cwd: scratch, env: environment });
       await execute('git', ['add', '-A'], { cwd: scratch, env: environment });
-      const reference = await runWorker({ root: scratch, cwd: fixture.cwd, query: fixture.query }, { workerPath: join(frozen, 'bin/inspect-context') });
+      const reference = invokeGoOracle(join(frozen, 'bin/inspect-context'), { root: scratch, cwd: fixture.cwd, query: fixture.query });
       const candidate = buildEvidencePacket({
         query: fixture.query, cwd: fixture.cwd, scope: nearestScope(files, fixture.cwd), files,
         repository: reference.target.repository, ...(reference.snapshot.revision === undefined ? {} : { revision: reference.snapshot.revision }), snapshotId: reference.snapshot.id,
