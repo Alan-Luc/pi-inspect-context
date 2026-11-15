@@ -76,13 +76,27 @@ test('reads dirty worktree content instead of staged index content', async () =>
   });
 });
 
-test('retrieval ranking timing includes evidence packet construction', async () => {
+test('retrieval ranking timing includes evidence packet construction', async (context) => {
+  let clock = 0;
+  let serializedPackets = 0;
+  const stringify = JSON.stringify;
+  context.mock.method(performance, 'now', () => clock);
+  context.mock.method(JSON, 'stringify', (value, ...arguments_) => {
+    if (value?.version === 1 && value.target?.query === 'timingNeedle' && Array.isArray(value.excerpts)) {
+      serializedPackets++;
+      clock += 25;
+    }
+    return stringify(value, ...arguments_);
+  });
   await repository(async (root) => {
-    const lines = Array.from({ length: 800 }, (_, index) => `export function timingNeedle${index}() { return timingNeedle; }\n`).join('');
-    await writeFile(join(root, 'source.ts'), lines);
+    const source = 'export function timingNeedle() {}\n';
+    await writeFile(join(root, 'source.ts'), source);
     const packet = await inspect(root, 'timingNeedle');
+    context.mock.restoreAll();
+    assert.equal(serializedPackets, 1);
     assert.equal(packet.receipt.readFiles, 1);
-    assert.ok(packet.receipt.stageDurationsMs.retrievalRanking > 1);
+    assert.ok(packet.excerpts.some(item => item.path === 'source.ts' && item.text === source));
+    assert.equal(packet.receipt.stageDurationsMs.retrievalRanking, 25);
     assert.ok(packetByteLength(packet) <= MAX_PACKET_BYTES);
   });
 });
