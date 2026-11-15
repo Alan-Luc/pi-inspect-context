@@ -29,6 +29,7 @@ jobs:
         working-directory: candidate
         run: |
           npm ci --ignore-scripts --legacy-peer-deps
+          npm run typecheck
           npm test
       - name: Prepare base
         working-directory: base

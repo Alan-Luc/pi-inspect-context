@@ -31,13 +31,16 @@
     "ffi-rs": "1.3.7"
   },
   "devDependencies": {
-    "typebox": "1.3.27"
+    "@types/node": "22.10.6",
+    "typebox": "1.3.27",
+    "typescript": "5.7.3"
   },
   "scripts": {
     "bench": "node --experimental-strip-types bench/inspect-context.mjs",
     "build": "node scripts/build-worker.mjs",
     "prepare": "node scripts/build-typescript-worker.mjs",
     "build:typescript": "node scripts/build-typescript-worker.mjs",
+    "typecheck": "tsc --noEmit --strict --skipLibCheck --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --types node src/adapter.ts",
     "test": "npm run test:node && npm run build && npm run test:typescript && npm run test:integration",
     "test:node": "node --experimental-strip-types --test test/packet.test.ts test/adapter.test.ts test/package.test.mjs test/benchmark.test.mjs test/benchmark-gate.test.mjs test/session-metrics.test.mjs",
     "test:typescript": "npm run build:typescript && node --experimental-strip-types --test test/worker/*.test.mjs test/tool.test.ts",
