@@ -21,6 +21,7 @@ const categoryKinds: ExcerptKind[] = ['governing', 'definition', 'caller', 'impo
 const primaryKinds: ExcerptKind[] = ['governing', 'test', 'configuration', 'definition', 'caller', 'import'];
 
 function lower(value: string): string {
+  if (!/[^\x00-\x7f]/.test(value)) return value.toLowerCase();
   return Array.from(value, character => [...character.toLowerCase()][0]).join('');
 }
 export { lower as lowercaseSearchText };

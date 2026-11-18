@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { Value } from 'typebox/value';
 import { RESEARCH_PACKET_V1_SCHEMA } from '../../src/packet.ts';
-import { buildEvidencePacket, extractSearchTerms, matchingSearchTerms, matchingPathTerms, orderGitCandidates, exclusionReason, exclusionReasonForDirectory, governingName, sourceLines } from '../../src/worker/retrieval.ts';
+import { buildEvidencePacket, extractSearchTerms, lowercaseSearchText, matchingSearchTerms, matchingPathTerms, orderGitCandidates, exclusionReason, exclusionReasonForDirectory, governingName, sourceLines } from '../../src/worker/retrieval.ts';
 
 function packet(query, sources, scope = '.') {
   const files = Object.entries(sources).map(([path, text]) => ({ path, text, lines: sourceLines(text) }));
@@ -28,6 +28,23 @@ test('lexical terms preserve Unicode tokenization, stop words, and slash boundar
   assert.deepEqual(matchingSearchTerms('x/health', terms), []);
   assert.deepEqual(matchingSearchTerms('x/health health /healthiness', terms), [0]);
   assert.deepEqual(matchingPathTerms('src/health.ts', terms), [0]);
+});
+
+test('lowercase search text preserves ASCII and character-wise Unicode behavior', () => {
+  for (const [input, expected] of [
+    ['ASCII Search 123', 'ascii search 123'],
+    ['A\0B\tC\nD', 'a\0b\tc\nd'],
+    ['İ', 'i'],
+    ['ΣΟΣ', 'σοσ'],
+    ['A\u0301', 'a\u0301'],
+    ['𐐀', '𐐨'],
+  ]) assert.equal(lowercaseSearchText(input), expected);
+});
+
+test('Unicode before an ASCII search match preserves original excerpt lines and text', () => {
+  const result = packet('NEEDLE', { 'source.ts': '𐐀 heading\nprefix NEEDLE();\nafter\n' });
+  verify(result);
+  assert.deepEqual(result.excerpts.map(({ startLine, endLine, text }) => [startLine, endLine, text]), [[1, 3, '𐐀 heading\nprefix NEEDLE();\nafter\n']]);
 });
 
 test('Git ordering reserves exact paths and the best rare-term covering candidate', () => {
