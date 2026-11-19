@@ -146,13 +146,20 @@ async function verifyGitRoot(rootPath: string, root: number, signal?: AbortSigna
   const topPath = parseGitLine(top.stdout, 'Git top-level');
   if (resolve(topPath) !== topPath || realpathSync(topPath) !== rootPath) throw new InspectContextError('root', 'Git top-level does not match the authorized root');
 }
+// Runs alongside the snapshot commands; callers await it before using their output, so a root mismatch still wins.
+function startGitRootCheck(rootPath: string, root: number, signal?: AbortSignal): Promise<void> {
+  const check = verifyGitRoot(rootPath, root, signal);
+  check.catch(() => {});
+  return check;
+}
 async function verifyGitSnapshot(rootPath: string, root: number, initial: GitInventory, signal?: AbortSignal): Promise<void> {
-  await verifyGitRoot(rootPath, root, signal);
+  const rootCheck = startGitRootCheck(rootPath, root, signal);
   const outcomes = await Promise.allSettled([
     runGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], '', 4096, signal),
     runGit(root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-renames'], '', undefined, signal),
     runGit(root, ['ls-files', '-t', '--cached', '-z'], '', undefined, signal),
   ]);
+  await rootCheck;
   const [head, status, listing] = outcomes.map(outcome => {
     if (outcome.status === 'rejected') throw outcome.reason;
     return outcome.value;
@@ -222,12 +229,13 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
     const fingerprint = createHash('sha256').update(entries.map(fileFingerprint).join('')).digest('hex');
     return { kind: 'filesystem', entries: entries.sort((a, b) => compareText(a.path, b.path)), fingerprint, worktree: new Set() };
   }
-  await verifyGitRoot(rootPath, root, signal);
+  const rootCheck = startGitRootCheck(rootPath, root, signal);
   const outcomes = await Promise.allSettled([
     runGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], '', 4096, signal),
     runGit(root, ['ls-files', '-t', '--cached', '--others', '--exclude-standard', '-z'], '', undefined, signal),
     runGit(root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-renames'], '', undefined, signal),
   ]);
+  await rootCheck;
   const [head, listing, status] = outcomes.map(outcome => {
     if (outcome.status === 'rejected') throw outcome.reason;
     return outcome.value;
