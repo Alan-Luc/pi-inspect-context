@@ -83,10 +83,31 @@ function withParent<Result>(root: number, path: string, action: (parent: number,
     return action(parent, components[components.length - 1]);
   } finally { if (owned) closeSync(parent); }
 }
-function metadataAt(root: number, path: string): FileMetadata {
-  const metadata = withParent(root, path, statAt);
+function checkedMetadata(path: string, metadata: FileMetadata): FileMetadata {
   if (isType(metadata, symlinkType)) throw new InspectContextError('root', `repository path ${JSON.stringify(path)} is a symlink`);
   return metadata;
+}
+function metadataAt(root: number, path: string): FileMetadata {
+  return checkedMetadata(path, withParent(root, path, statAt));
+}
+type MetadataReader = { metadataAt: (path: string) => FileMetadata; close: () => void };
+// Reuses only the previous path's open parent chain, so open descriptors stay bounded by path depth.
+function openMetadataReader(root: number): MetadataReader {
+  const chain: { name: string; descriptor: number }[] = [];
+  const release = (from: number) => { for (const { descriptor } of chain.splice(from)) closeSync(descriptor); };
+  return {
+    metadataAt(path) {
+      if (!safeRepositoryPath(path)) throw new InspectContextError('root', `unsafe repository path ${JSON.stringify(path)}`);
+      const components = path.split('/');
+      const directories = components.slice(0, -1);
+      let shared = 0;
+      while (shared < chain.length && shared < directories.length && chain[shared].name === directories[shared]) shared++;
+      release(shared);
+      for (const name of directories.slice(shared)) chain.push({ name, descriptor: openAt(chain.at(-1)?.descriptor ?? root, name, true) });
+      return checkedMetadata(path, statAt(chain.at(-1)?.descriptor ?? root, components[components.length - 1]));
+    },
+    close() { release(0); },
+  };
 }
 function openPath(root: number, path: string, directory = false): number {
   return withParent(root, path, (parent, name) => openAt(parent, name, directory));
@@ -144,25 +165,28 @@ async function verifyGitSnapshot(rootPath: string, root: number, initial: GitInv
   const skipWorktreePaths = new Set(parseGitPaths(listing.stdout).filter(entry => entry.skipWorktree).map(entry => entry.path));
   if (initial.skipWorktreePaths.size !== skipWorktreePaths.size || [...initial.skipWorktreePaths].some(path => !skipWorktreePaths.has(path))) throw new InspectContextError('snapshot_changed', 'Git skip-worktree flags changed during scan');
   const entries = new Map(initial.entries.map(entry => [entry.path, entry]));
-  for (const path of initial.worktree) {
-    const expected = entries.get(path)?.metadata;
-    let metadata: FileMetadata;
-    try { metadata = metadataAt(root, path); }
-    catch (error) {
-      if (!expected && hasErrorCode(error, 'ENOENT')) continue;
-      throw new InspectContextError('snapshot_changed', `worktree admission changed during scan: ${path}`);
+  const reader = openMetadataReader(root);
+  try {
+    for (const path of initial.worktree) {
+      const expected = entries.get(path)?.metadata;
+      let metadata: FileMetadata;
+      try { metadata = reader.metadataAt(path); }
+      catch (error) {
+        if (!expected && hasErrorCode(error, 'ENOENT')) continue;
+        throw new InspectContextError('snapshot_changed', `worktree admission changed during scan: ${path}`);
+      }
+      if (!expected || !sameMetadata(metadata, expected)) throw new InspectContextError('snapshot_changed', `worktree admission changed during scan: ${path}`);
     }
-    if (!expected || !sameMetadata(metadata, expected)) throw new InspectContextError('snapshot_changed', `worktree admission changed during scan: ${path}`);
-  }
-  for (const admission of initial.sparseAdmissions) {
-    let metadata: FileMetadata;
-    try { metadata = metadataAt(root, admission.path); }
-    catch (error) {
-      if (admission.kind === 'absent' && hasErrorCode(error, 'ENOENT')) continue;
-      throw new InspectContextError('snapshot_changed', `sparse admission changed during scan: ${admission.path}`);
+    for (const admission of initial.sparseAdmissions) {
+      let metadata: FileMetadata;
+      try { metadata = reader.metadataAt(admission.path); }
+      catch (error) {
+        if (admission.kind === 'absent' && hasErrorCode(error, 'ENOENT')) continue;
+        throw new InspectContextError('snapshot_changed', `sparse admission changed during scan: ${admission.path}`);
+      }
+      if (admission.kind === 'absent' || !sameMetadata(metadata, admission.metadata)) throw new InspectContextError('snapshot_changed', `sparse admission changed during scan: ${admission.path}`);
     }
-    if (admission.kind === 'absent' || !sameMetadata(metadata, admission.metadata)) throw new InspectContextError('snapshot_changed', `sparse admission changed during scan: ${admission.path}`);
-  }
+  } finally { reader.close(); }
 }
 async function collectInventory(rootPath: string, root: number, signal?: AbortSignal): Promise<Inventory> {
   signal?.throwIfAborted();
@@ -214,36 +238,40 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
   const known = new Set<string>();
   const skipWorktreePaths = new Set(paths.filter(entry => entry.skipWorktree).map(entry => entry.path));
   const sparseAdmissions: SparseAdmission[] = [];
-  for (const { path, skipWorktree } of paths) {
-    known.add(path);
-    const entry: InventoryEntry = { path, excluded: exclusionReason(path) };
-    if (skipWorktree && !entry.excluded) {
-      try {
-        const metadata = metadataAt(root, path);
-        entry.metadata = metadata;
-        sparseAdmissions.push({ path, kind: 'present', metadata });
-      } catch (error) {
-        if (!hasErrorCode(error, 'ENOENT')) throw error;
-        entry.excluded = 'ineligible_file';
-        sparseAdmissions.push({ path, kind: 'absent' });
+  const reader = openMetadataReader(root);
+  let worktree: Set<string>;
+  try {
+    for (const { path, skipWorktree } of paths) {
+      known.add(path);
+      const entry: InventoryEntry = { path, excluded: exclusionReason(path) };
+      if (skipWorktree && !entry.excluded) {
+        try {
+          const metadata = reader.metadataAt(path);
+          entry.metadata = metadata;
+          sparseAdmissions.push({ path, kind: 'present', metadata });
+        } catch (error) {
+          if (!hasErrorCode(error, 'ENOENT')) throw error;
+          entry.excluded = 'ineligible_file';
+          sparseAdmissions.push({ path, kind: 'absent' });
+        }
       }
+      entries.push(entry);
     }
-    entries.push(entry);
-  }
-  if (status.code !== 0) throw new InspectContextError('inventory', `Git status failed: ${status.stderr.toString().trim()}`);
-  const worktree = new Set(parseGitStatusPaths(status.stdout, known));
-  const byPath = new Map(entries.map(entry => [entry.path, entry]));
-  for (const path of worktree) {
-    const entry = byPath.get(path);
-    if (!entry) throw new InspectContextError('inventory', 'Git status path is absent from inventory');
-    try { entry.metadata = metadataAt(root, path); }
-    catch (error) {
-      if (!hasErrorCode(error, 'ENOENT')) throw error;
-      entry.excluded ??= 'ineligible_file';
-      continue;
+    if (status.code !== 0) throw new InspectContextError('inventory', `Git status failed: ${status.stderr.toString().trim()}`);
+    worktree = new Set(parseGitStatusPaths(status.stdout, known));
+    const byPath = new Map(entries.map(entry => [entry.path, entry]));
+    for (const path of worktree) {
+      const entry = byPath.get(path);
+      if (!entry) throw new InspectContextError('inventory', 'Git status path is absent from inventory');
+      try { entry.metadata = reader.metadataAt(path); }
+      catch (error) {
+        if (!hasErrorCode(error, 'ENOENT')) throw error;
+        entry.excluded ??= 'ineligible_file';
+        continue;
+      }
+      if (!entry.excluded && !isType(entry.metadata, regularType)) throw new InspectContextError('inventory', `candidate path ${JSON.stringify(path)} is not a regular file`);
     }
-    if (!entry.excluded && !isType(entry.metadata, regularType)) throw new InspectContextError('inventory', `candidate path ${JSON.stringify(path)} is not a regular file`);
-  }
+  } finally { reader.close(); }
   const fingerprint = createHash('sha256');
   fingerprint.update(revision === undefined ? 'unborn\0' : `HEAD\0${revision}\0`);
   fingerprint.update(`inventory\0${listing.stdout.length}\0`).update(listing.stdout);
@@ -474,9 +502,12 @@ export class InspectionEngine {
           }
         }
         finally { closeSync(currentRoot); }
-        for (const [path, expected] of accepted) {
-          if (!sameMetadata(metadataAt(root, path), expected)) throw new InspectContextError('snapshot_changed', `accepted file changed during scan: ${path}`);
-        }
+        const reader = openMetadataReader(root);
+        try {
+          for (const [path, expected] of accepted) {
+            if (!sameMetadata(reader.metadataAt(path), expected)) throw new InspectContextError('snapshot_changed', `accepted file changed during scan: ${path}`);
+          }
+        } finally { reader.close(); }
       } catch (error) {
         if (error instanceof InspectContextError && error.code === 'snapshot_changed') throw error;
         throw new InspectContextError('snapshot_changed', `verify accepted snapshot: ${errorMessage(error)}`);

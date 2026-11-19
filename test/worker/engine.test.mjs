@@ -210,3 +210,23 @@ test('starts a Git grep for every search term before any of them finishes', asyn
     }
   });
 });
+
+test('reads metadata for untracked files across nested, sibling and root directories', async () => {
+  await fixture(async root => {
+    await writeFile(join(root, 'tracked.py'), 'tracked = True\n');
+    await execute('git', ['init', '--quiet'], { cwd: root });
+    await execute('git', ['add', '-A'], { cwd: root });
+    await execute('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
+    const paths = ['a/b/one.py', 'a/b/two.py', 'a/c/three.py', 'a/four.py', 'd/e/f/five.py', 'six.py', 'd/seven.py'];
+    for (const path of paths) {
+      await mkdir(join(root, ...path.split('/').slice(0, -1)), { recursive: true });
+      await writeFile(join(root, path), `nestedNeedle = "${path}"\n`);
+    }
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'nestedNeedle' }, { version: 1, root });
+      assert.deepEqual(packet.excerpts.map(item => item.path).sort(), [...paths].sort());
+      assert.equal(packet.snapshot.validated, true);
+    } finally { await engine.close(); }
+  });
+});
