@@ -16,7 +16,6 @@ const regularType = 0o100000n;
 const symlinkType = 0o120000n;
 const maxFilesystemEntries = 100_000;
 const maxGitCleanCandidates = 64;
-const maxGitSearchWorkers = 8;
 const packageMarkers = new Set(['package.json', 'pyproject.toml', 'go.mod', 'Cargo.toml', 'pom.xml', 'build.gradle']);
 type InventoryEntry = { path: string; metadata?: FileMetadata; excluded?: OmissionReason };
 type SparseAdmission = { path: string; kind: 'absent' } | { path: string; kind: 'present'; metadata: FileMetadata };
@@ -291,6 +290,7 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
 export class InspectionEngine {
   private readonly release = acquireNativeFiles();
   private readonly resident: ResidentDiscovery;
+  private readonly nativeIneligibleRoots = new Set<string>();
   private closed = false;
   private active = 0;
   private readonly idle: (() => void)[] = [];
@@ -328,14 +328,28 @@ export class InspectionEngine {
     if (cwd !== '' && cwd !== '.' && !safeRepositoryPath(cwd)) throw new InspectContextError('root', 'cwd must be a safe root-relative directory');
     const started = performance.now();
     const root = openRoot(request.root);
+    const terms = extractSearchTerms(query);
+    const asciiTerms = terms.every(term => /^[\x00-\x7f]*$/.test(term.original));
+    const termGrepController = new AbortController();
+    const abortTermGreps = () => termGrepController.abort(signal?.reason);
+    signal?.addEventListener('abort', abortTermGreps, { once: true });
+    const startTermGreps = () => {
+      const greps = terms.map(term => runGit(root, ['grep', '--cached', '-F', '-i', '-I', '-l', '-z', '-f', '-', '--'], `${term.lower}\n`, undefined, termGrepController.signal));
+      for (const grep of greps) grep.catch(() => {});
+      return greps;
+    };
+    // Git grep --cached reads only the index, so it can overlap inventory collection; the final snapshot check still covers it.
+    // Only roots last seen above the native admission limit start early, so native-served requests keep running no Git grep.
+    let termGreps = asciiTerms && this.nativeIneligibleRoots.has(request.root) ? startTermGreps() : undefined;
     try {
       const rootIdentity = descriptorMetadata(root);
       const discoveryStarted = performance.now();
       let directReadsMs = 0;
       const initial = await collectInventory(request.root, root, signal);
+      if (initial.entries.length > MAX_DISCOVERED_FILES) this.nativeIneligibleRoots.add(request.root);
+      else this.nativeIneligibleRoots.delete(request.root);
       const residentIdentity = `${rootIdentity.dev}:${rootIdentity.ino}:${initial.kind === 'git' ? initial.revision ?? 'unborn' : initial.fingerprint}`;
       const scope = nearestScope(root, cwd, initial);
-      const terms = extractSearchTerms(query);
       if (!terms.length) throw new InspectContextError('protocol', 'query has no searchable terms');
       const omissions = new Omissions();
       const eligible = initial.entries.filter(entry => {
@@ -396,7 +410,7 @@ export class InspectionEngine {
         admittedFiles.set(entry.path, file ?? null);
         return file;
       };
-      if (initial.kind === 'git' && terms.every(term => /^[\x00-\x7f]*$/.test(term.original))) {
+      if (initial.kind === 'git' && asciiTerms) {
         const byPath = new Map(initial.entries.map(entry => [entry.path, entry]));
         const worktree = eligible.filter(entry => initial.worktree.has(entry.path)).sort((a, b) => Number(localPath(b.path, scope)) - Number(localPath(a.path, scope)) || Number(matchingPathTerms(lowercaseSearchText(b.path), terms).length > 0) - Number(matchingPathTerms(lowercaseSearchText(a.path), terms).length > 0) || compareText(a.path, b.path));
         const worktreeContent = new Map<string, number[]>();
@@ -438,15 +452,13 @@ export class InspectionEngine {
           }
         }
         if (!nativeSuccess && eligible.some(entry => !initial.worktree.has(entry.path))) {
-          for (let start = 0; start < terms.length; start += maxGitSearchWorkers) {
-            const outcomes = await Promise.all(terms.slice(start, start + maxGitSearchWorkers).map(term => runGit(root, ['grep', '--cached', '-F', '-i', '-I', '-l', '-z', '-f', '-', '--'], `${term.lower}\n`, undefined, signal)));
-            for (const [offset, outcome] of outcomes.entries()) {
-              if (outcome.code === 1) continue;
-              if (outcome.code !== 0) throw new InspectContextError('scan', `Git grep failed: ${outcome.stderr.toString().trim()}`);
-              for (const path of parseGitMatchPaths(outcome.stdout, known)) {
-                if (initial.worktree.has(path) || byPath.get(path)?.excluded) continue;
-                contentByPath.set(path, [...(contentByPath.get(path) ?? []), start + offset]);
-              }
+          termGreps ??= startTermGreps();
+          for (const [index, outcome] of (await Promise.all(termGreps)).entries()) {
+            if (outcome.code === 1) continue;
+            if (outcome.code !== 0) throw new InspectContextError('scan', `Git grep failed: ${outcome.stderr.toString().trim()}`);
+            for (const path of parseGitMatchPaths(outcome.stdout, known)) {
+              if (initial.worktree.has(path) || byPath.get(path)?.excluded) continue;
+              contentByPath.set(path, [...(contentByPath.get(path) ?? []), index]);
             }
           }
         }
@@ -526,6 +538,10 @@ export class InspectionEngine {
       const packet = buildEvidencePacket({ query, cwd, repository: initial.kind, revision: initial.kind === 'git' ? initial.revision : undefined, snapshotId: initial.fingerprint, files, scope, discoveredFiles, readFiles, bytesRead, omissions: omissions.values(), durationMs: performance.now() - started, stageDurationsMs });
       stageDurationsMs.retrievalRanking = Math.max(0, performance.now() - retrievalStarted);
       return packet;
-    } finally { closeSync(root); }
+    } finally {
+      termGrepController.abort();
+      signal?.removeEventListener('abort', abortTermGreps);
+      closeSync(root);
+    }
   }
 }

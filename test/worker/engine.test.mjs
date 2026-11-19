@@ -230,3 +230,63 @@ test('reads metadata for untracked files across nested, sibling and root directo
     } finally { await engine.close(); }
   });
 });
+
+async function recordGitSpawns(root, query, requests = 1) {
+  const childProcess = await import('node:child_process');
+  const { syncBuiltinESMExports } = await import('node:module');
+  const original = childProcess.default.spawn;
+  const events = [];
+  childProcess.default.spawn = (file, args, options) => {
+    const child = original(file, args, options);
+    const command = args.find(argument => ['grep', 'ls-files', 'status', 'rev-parse'].includes(argument)) ?? 'other';
+    const label = command === 'rev-parse' && args.includes('--show-toplevel') ? 'toplevel' : command;
+    events.push(`start ${label}`);
+    child.once('close', () => events.push(`close ${label}`));
+    return child;
+  };
+  syncBuiltinESMExports();
+  const engine = new InspectionEngine();
+  try {
+    for (let request = 0; request < requests; request++) {
+      events.push(`request ${request}`);
+      await engine.inspect({ version: 1, root, query }, { version: 1, root });
+    }
+  } finally {
+    childProcess.default.spawn = original;
+    syncBuiltinESMExports();
+    await engine.close();
+  }
+  return events;
+}
+
+async function committedFixture(root) {
+  await writeFile(join(root, 'source.py'), 'overlapNeedle = True\n');
+  await execute('git', ['init', '--quiet'], { cwd: root });
+  await execute('git', ['add', '-A'], { cwd: root });
+  await execute('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
+}
+
+test('starts Git grep before the inventory listing finishes once a root is known to exceed native admission', async () => {
+  await fixture(async root => {
+    await mkdir(join(root, 'many'));
+    await Promise.all(Array.from({ length: 2001 }, (_, index) => writeFile(join(root, 'many', `file${index}.txt`), `${index}\n`)));
+    await committedFixture(root);
+    const events = await recordGitSpawns(root, 'overlapNeedle', 2);
+    const first = events.slice(0, events.indexOf('request 1'));
+    const second = events.slice(events.indexOf('request 1'));
+    assert.ok(first.indexOf('start grep') > first.indexOf('close ls-files'), first.join(', '));
+    assert.ok(second.indexOf('start grep') >= 0 && second.indexOf('start grep') < second.indexOf('close ls-files'), second.join(', '));
+  });
+});
+
+test('checks the Git top-level alongside the snapshot commands', async () => {
+  await fixture(async root => {
+    await committedFixture(root);
+    const events = await recordGitSpawns(root, 'overlapNeedle');
+    const initialStatus = events.indexOf('start status');
+    const finalStatus = events.lastIndexOf('start status');
+    const initialTop = events.indexOf('close toplevel');
+    const finalTop = events.lastIndexOf('close toplevel');
+    assert.ok(initialStatus < initialTop && finalStatus < finalTop && finalStatus > initialTop, events.join(', '));
+  });
+});
