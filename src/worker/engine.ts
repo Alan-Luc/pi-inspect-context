@@ -24,6 +24,17 @@ type FilesystemInventory = InventoryFields & { kind: 'filesystem' };
 type GitInventory = InventoryFields & { kind: 'git'; revision: string | undefined; status: Buffer; sparseAdmissions: SparseAdmission[]; skipWorktreePaths: Set<string> };
 type Inventory = FilesystemInventory | GitInventory;
 
+type GitPath = ReturnType<typeof parseGitPaths>[number];
+const parsedListings: { bytes: Buffer; paths: readonly GitPath[] }[] = [];
+// Warm requests repeat the same inventory and flag listings byte for byte, and parsing is pure.
+function parseRepeatedGitPaths(bytes: Buffer): readonly GitPath[] {
+  const cached = parsedListings.find(entry => entry.bytes.equals(bytes));
+  if (cached) return cached.paths;
+  const paths = parseGitPaths(bytes);
+  parsedListings.unshift({ bytes, paths });
+  parsedListings.length = Math.min(parsedListings.length, 2);
+  return paths;
+}
 function compareText(left: string, right: string): number { return Buffer.compare(Buffer.from(left), Buffer.from(right)); }
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function hasErrorCode(error: unknown, code: keyof typeof operatingSystemConstants.errno): boolean {
@@ -168,7 +179,7 @@ async function verifyGitSnapshot(rootPath: string, root: number, initial: GitInv
   if (status.code !== 0) throw new InspectContextError('inventory', `Git status failed: ${status.stderr.toString().trim()}`);
   if (!initial.status.equals(status.stdout)) throw new InspectContextError('snapshot_changed', 'Git status changed during scan');
   if (listing.code !== 0) throw new InspectContextError('inventory', `Git flag check failed: ${listing.stderr.toString().trim()}`);
-  const skipWorktreePaths = new Set(parseGitPaths(listing.stdout).filter(entry => entry.skipWorktree).map(entry => entry.path));
+  const skipWorktreePaths = new Set(parseRepeatedGitPaths(listing.stdout).filter(entry => entry.skipWorktree).map(entry => entry.path));
   if (initial.skipWorktreePaths.size !== skipWorktreePaths.size || [...initial.skipWorktreePaths].some(path => !skipWorktreePaths.has(path))) throw new InspectContextError('snapshot_changed', 'Git skip-worktree flags changed during scan');
   const entries = new Map(initial.entries.map(entry => [entry.path, entry]));
   const reader = openMetadataReader(root);
@@ -241,7 +252,7 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
   });
   const revision = parseGitRevision(head, 'Git HEAD');
   if (listing.code !== 0) throw new InspectContextError('inventory', `Git inventory failed: ${listing.stderr.toString().trim()}`);
-  const paths = parseGitPaths(listing.stdout);
+  const paths = parseRepeatedGitPaths(listing.stdout);
   const known = new Set<string>();
   const skipWorktreePaths = new Set(paths.filter(entry => entry.skipWorktree).map(entry => entry.path));
   const sparseAdmissions: SparseAdmission[] = [];
