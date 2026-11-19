@@ -290,3 +290,29 @@ test('checks the Git top-level alongside the snapshot commands', async () => {
     assert.ok(initialStatus < initialTop && finalStatus < finalTop && finalStatus > initialTop, events.join(', '));
   });
 });
+
+test('walks untracked files once per inventory, through Git status', async () => {
+  await fixture(async root => {
+    await committedFixture(root);
+    await writeFile(join(root, 'untracked.py'), 'overlapNeedle = 1\n');
+    const events = [];
+    const childProcess = await import('node:child_process');
+    const { syncBuiltinESMExports } = await import('node:module');
+    const original = childProcess.default.spawn;
+    childProcess.default.spawn = (file, args, options) => {
+      if (args.includes('ls-files')) events.push(args.includes('--others') ? 'ls-files others' : 'ls-files cached');
+      return original(file, args, options);
+    };
+    syncBuiltinESMExports();
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'overlapNeedle' }, { version: 1, root });
+      assert.ok(packet.excerpts.some(item => item.path === 'untracked.py'));
+      assert.deepEqual(events, ['ls-files cached', 'ls-files cached']);
+    } finally {
+      childProcess.default.spawn = original;
+      syncBuiltinESMExports();
+      await engine.close();
+    }
+  });
+});

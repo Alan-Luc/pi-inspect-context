@@ -24,6 +24,15 @@ type FilesystemInventory = InventoryFields & { kind: 'filesystem' };
 type GitInventory = InventoryFields & { kind: 'git'; revision: string | undefined; status: Buffer; sparseAdmissions: SparseAdmission[]; skipWorktreePaths: Set<string> };
 type Inventory = FilesystemInventory | GitInventory;
 
+// Reproduces `ls-files -t --cached --others --exclude-standard -z` bytes: untracked `? path` records first, in status order.
+// Status walks the same untracked paths, so one directory walk serves both.
+function untrackedListing(status: Buffer): Buffer {
+  const records: Buffer[] = [];
+  for (let start = 0, end = status.indexOf(0); end >= 0; start = end + 1, end = status.indexOf(0, start)) {
+    if (status[start] === 0x3f && status[start + 1] === 0x20) records.push(status.subarray(start, end + 1));
+  }
+  return Buffer.concat(records);
+}
 type GitPath = ReturnType<typeof parseGitPaths>[number];
 const parsedListings: { bytes: Buffer; paths: readonly GitPath[] }[] = [];
 // Warm requests repeat the same inventory and flag listings byte for byte, and parsing is pure.
@@ -242,14 +251,15 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
   const rootCheck = startGitRootCheck(rootPath, root, signal);
   const outcomes = await Promise.allSettled([
     runGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], '', 4096, signal),
-    runGit(root, ['ls-files', '-t', '--cached', '--others', '--exclude-standard', '-z'], '', undefined, signal),
+    runGit(root, ['ls-files', '-t', '--cached', '-z'], '', undefined, signal),
     runGit(root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-renames'], '', undefined, signal),
   ]);
   await rootCheck;
-  const [head, listing, status] = outcomes.map(outcome => {
+  const [head, cached, status] = outcomes.map(outcome => {
     if (outcome.status === 'rejected') throw outcome.reason;
     return outcome.value;
   });
+  const listing = { ...cached, stdout: Buffer.concat([untrackedListing(status.stdout), cached.stdout]) };
   const revision = parseGitRevision(head, 'Git HEAD');
   if (listing.code !== 0) throw new InspectContextError('inventory', `Git inventory failed: ${listing.stderr.toString().trim()}`);
   const paths = parseRepeatedGitPaths(listing.stdout);
