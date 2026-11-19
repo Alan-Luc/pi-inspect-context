@@ -367,7 +367,7 @@ export class InspectionEngine {
       const discoveryStarted = performance.now();
       let directReadsMs = 0;
       const initial = await collectInventory(request.root, root, signal);
-      if (initial.entries.length > MAX_DISCOVERED_FILES) this.nativeIneligibleRoots.add(request.root);
+      if (initial.kind === 'git' && initial.entries.length > MAX_DISCOVERED_FILES) this.nativeIneligibleRoots.add(request.root);
       else this.nativeIneligibleRoots.delete(request.root);
       const residentIdentity = `${rootIdentity.dev}:${rootIdentity.ino}:${initial.kind === 'git' ? initial.revision ?? 'unborn' : initial.fingerprint}`;
       const scope = nearestScope(root, cwd, initial);
