@@ -269,7 +269,8 @@ function literalSpans(file: RetrievalFile, query: string, visit: (first: number,
   }
 }
 function collectCandidates(files: RetrievalFile[], query: string, terms: SearchTerm[]) {
-  const frequencies = terms.map((_, index) => files.filter(file => candidateTerms({ path: file.path, contentTerms: matchingSearchTerms(lower(file.text), terms), pathTerms: matchingPathTerms(lower(file.path), terms) }).includes(index)).length);
+  const fileTerms = files.map(file => candidateTerms({ path: file.path, contentTerms: matchingSearchTerms(lower(file.text), terms), pathTerms: matchingPathTerms(lower(file.path), terms) }));
+  const frequencies = terms.map((_, index) => fileTerms.filter(matched => matched.includes(index)).length);
   const highest = Math.max(0, ...frequencies);
   const candidates: RetrievalCandidate[] = [];
   let exactObserved = 0;
