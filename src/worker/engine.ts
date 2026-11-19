@@ -355,7 +355,8 @@ export class InspectionEngine {
     const abortTermGreps = () => termGrepController.abort(signal?.reason);
     signal?.addEventListener('abort', abortTermGreps, { once: true });
     const startTermGreps = () => {
-      const greps = terms.map(term => runGit(root, ['grep', '--cached', '-F', '-i', '-I', '-l', '-z', '-f', '-', '--'], `${term.lower}\n`, undefined, termGrepController.signal));
+      // Two threads per term measured faster than Git's default when up to eight term greps overlap the status walk.
+      const greps = terms.map(term => runGit(root, ['grep', '--cached', '--threads=2', '-F', '-i', '-I', '-l', '-z', '-f', '-', '--'], `${term.lower}\n`, undefined, termGrepController.signal));
       for (const grep of greps) grep.catch(() => {});
       return greps;
     };
