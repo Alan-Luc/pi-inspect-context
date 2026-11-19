@@ -403,7 +403,7 @@ export class InspectionEngine {
         }
         if (!nativeSuccess && eligible.some(entry => !initial.worktree.has(entry.path))) {
           for (let start = 0; start < terms.length; start += maxGitSearchWorkers) {
-            const outcomes = await Promise.all(terms.slice(start, start + maxGitSearchWorkers).map(term => runGit(root, ['grep', '--cached', '-F', '-i', '-I', '-l', '-z', '-f', '-', '--'], `${term.original}\n`, undefined, signal)));
+            const outcomes = await Promise.all(terms.slice(start, start + maxGitSearchWorkers).map(term => runGit(root, ['grep', '--cached', '-F', '-i', '-I', '-l', '-z', '-f', '-', '--'], `${term.lower}\n`, undefined, signal)));
             for (const [offset, outcome] of outcomes.entries()) {
               if (outcome.code === 1) continue;
               if (outcome.code !== 0) throw new InspectContextError('scan', `Git grep failed: ${outcome.stderr.toString().trim()}`);

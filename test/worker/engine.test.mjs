@@ -142,3 +142,38 @@ test('rejects symlink candidates instead of reading outside content', async () =
     } finally { await engine.close(); }
   });
 });
+
+for (const { query, pattern } of [{ query: 'DIAL_ID', pattern: 'dial_id\n' }, { query: 'WebSocketHeaders', pattern: 'websocketheaders\n' }]) {
+  test(`sends Git grep the lowercase pattern for ${query} and keeps case-insensitive matches`, async () => {
+    await fixture(async root => {
+      await writeFile(join(root, 'upper.py'), `VALUE = "${query.toUpperCase()}"\n`);
+      await writeFile(join(root, 'lower.py'), `value = "${query.toLowerCase()}"\n`);
+      await execute('git', ['init', '--quiet'], { cwd: root });
+      await execute('git', ['add', '-A'], { cwd: root });
+      await execute('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
+      const childProcess = await import('node:child_process');
+      const { syncBuiltinESMExports } = await import('node:module');
+      const original = childProcess.default.spawn;
+      const grepInputs = [];
+      childProcess.default.spawn = (file, args, options) => {
+        const child = original(file, args, options);
+        if (args.includes('grep')) {
+          const end = child.stdin.end.bind(child.stdin);
+          child.stdin.end = (chunk, ...rest) => { grepInputs.push(String(chunk)); return end(chunk, ...rest); };
+        }
+        return child;
+      };
+      syncBuiltinESMExports();
+      const engine = new InspectionEngine();
+      try {
+        const packet = await engine.inspect({ version: 1, root, query }, { version: 1, root });
+        assert.deepEqual(grepInputs, [pattern]);
+        assert.deepEqual(packet.excerpts.map(item => item.path).sort(), ['lower.py', 'upper.py']);
+      } finally {
+        childProcess.default.spawn = original;
+        syncBuiltinESMExports();
+        await engine.close();
+      }
+    });
+  });
+}
