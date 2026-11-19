@@ -177,3 +177,36 @@ for (const { query, pattern } of [{ query: 'DIAL_ID', pattern: 'dial_id\n' }, { 
     });
   });
 }
+
+test('starts a Git grep for every search term before any of them finishes', async () => {
+  await fixture(async root => {
+    await writeFile(join(root, 'source.py'), 'alpha bravo charlie delta echo foxtrot\n');
+    await execute('git', ['init', '--quiet'], { cwd: root });
+    await execute('git', ['add', '-A'], { cwd: root });
+    await execute('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
+    const childProcess = await import('node:child_process');
+    const { syncBuiltinESMExports } = await import('node:module');
+    const original = childProcess.default.spawn;
+    let started = 0;
+    let startedBeforeFirstClose;
+    childProcess.default.spawn = (file, args, options) => {
+      const child = original(file, args, options);
+      if (args.includes('grep')) {
+        started++;
+        child.once('close', () => { startedBeforeFirstClose ??= started; });
+      }
+      return child;
+    };
+    syncBuiltinESMExports();
+    const engine = new InspectionEngine();
+    try {
+      await engine.inspect({ version: 1, root, query: 'alpha bravo charlie delta echo foxtrot' }, { version: 1, root });
+      assert.equal(started, 6);
+      assert.equal(startedBeforeFirstClose, 6);
+    } finally {
+      childProcess.default.spawn = original;
+      syncBuiltinESMExports();
+      await engine.close();
+    }
+  });
+});
