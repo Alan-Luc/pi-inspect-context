@@ -263,7 +263,7 @@ async function committedFixture(root) {
   await writeFile(join(root, 'source.py'), 'overlapNeedle = True\n');
   await execute('git', ['init', '--quiet'], { cwd: root });
   await execute('git', ['add', '-A'], { cwd: root });
-  await execute('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
+  await execute('git', ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
 }
 
 test('starts Git grep before the inventory listing finishes once a root is known to exceed native admission', async () => {
