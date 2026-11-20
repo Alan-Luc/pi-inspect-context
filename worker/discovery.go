@@ -78,9 +78,7 @@ func collectGitInventory(repository *openedRepository, revision *string) ([]inve
 		}
 		info, lstatErr := lstatRepositoryPath(repository.root, path)
 		if errors.Is(lstatErr, fs.ErrNotExist) {
-			if entries[index].excluded == "" {
-				entries[index].excluded = "ineligible_file"
-			}
+			entries[index].excluded = "ineligible_file"
 			continue
 		}
 		if lstatErr != nil {
