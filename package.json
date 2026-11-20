@@ -42,7 +42,7 @@
     "build:typescript": "node scripts/build-typescript-worker.mjs",
     "typecheck": "tsc --noEmit --strict --skipLibCheck --allowImportingTsExtensions --module NodeNext --moduleResolution NodeNext --target ES2022 --types node src/adapter.ts",
     "test": "npm run test:node && npm run build && npm run test:typescript && npm run test:integration",
-    "test:node": "node --experimental-strip-types --test test/packet.test.ts test/adapter.test.ts test/package.test.mjs test/benchmark.test.mjs test/benchmark-gate.test.mjs test/session-metrics.test.mjs",
+    "test:node": "node --experimental-strip-types --test test/packet.test.ts test/adapter.test.ts test/package.test.mjs test/benchmark.test.mjs test/benchmark-gate.test.mjs test/session-metrics.test.mjs test/replay.test.mjs",
     "test:typescript": "npm run build:typescript && node --experimental-strip-types --test test/worker/*.test.mjs test/tool.test.ts",
     "test:go": "cd worker && go test ./...",
     "test:integration": "node --experimental-strip-types --test test/integration.test.ts"
