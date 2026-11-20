@@ -170,7 +170,7 @@ for (const ending of ['timeout', 'abort', 'close']) {
     const controller = new AbortController();
     try {
       const pending = session.run({ root: f.root, query: 'needle' }, { signal: controller.signal });
-      const rejected = assert.rejects(pending, ending === 'timeout' ? /timed out after 750ms/ : ending === 'close' ? /closed/ : /cancel active/);
+      const rejected = assert.rejects(pending, ending === 'timeout' ? /timed out after 1500ms/ : ending === 'close' ? /closed/ : /cancel active/);
       await waitFor(() => existsSync(probe));
       await assert.rejects(session.run({ root: f.root, query: 'needle' }), /active request/);
       const details = JSON.parse(readFileSync(probe, 'utf8'));
@@ -270,6 +270,47 @@ test('rejects an aborted call before starting resources', async () => {
   try {
     await assert.rejects(session.run({ root: f.root, query: 'needle' }, { signal: controller.signal }), /cancelled before start/);
     assert.equal(session.pid, undefined);
+  } finally {
+    await session.close();
+    rmSync(f.directory, { recursive: true, force: true });
+  }
+});
+
+const BUDGET_MS = 200;
+function delayedWorker(f, hang = false) {
+  return script(f, `
+    process.stdin.on('data', chunk => {
+      const request = JSON.parse(chunk.toString('utf8').trim());
+      const delay = Number(request.query.split(':')[1]);
+      const packet = ${JSON.stringify(validPacket())};
+      packet.target.query = request.query;
+      if (${hang}) return;
+      setTimeout(() => process.stdout.write(JSON.stringify(packet) + '\\n'), delay);
+    });
+  `);
+}
+test('gives a fresh worker twice the budget and later requests the plain budget', async () => {
+  const f = fixture();
+  const other = join(f.directory, 'other');
+  mkdirSync(other);
+  const session = new PersistentWorkerSession({ timeoutMs: BUDGET_MS, workerPath: delayedWorker(f) });
+  try {
+    await session.run({ root: f.root, query: 'slow:300' });
+    await session.run({ root: f.root, query: 'quick:10' });
+    await assert.rejects(session.run({ root: f.root, query: 'slow:300' }), /worker timed out after 200ms/);
+    await session.run({ root: other, query: 'slow:300' });
+  } finally {
+    await session.close();
+    rmSync(f.directory, { recursive: true, force: true });
+  }
+});
+test('kills a hung fresh worker at twice the budget', async () => {
+  const f = fixture();
+  const session = new PersistentWorkerSession({ timeoutMs: BUDGET_MS, workerPath: delayedWorker(f, true) });
+  try {
+    const started = Date.now();
+    await assert.rejects(session.run({ root: f.root, query: 'hang:0' }), /worker timed out after 400ms/);
+    assert.ok(Date.now() - started >= 2 * BUDGET_MS);
   } finally {
     await session.close();
     rmSync(f.directory, { recursive: true, force: true });

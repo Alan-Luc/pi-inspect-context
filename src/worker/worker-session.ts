@@ -169,9 +169,11 @@ export class PersistentWorkerSession {
       if (this.process && this.process.root !== root) await this.stop(this.process, new Error('inspection root changed'));
       options.signal?.throwIfAborted();
       if (this.closed) throw new Error('worker session is closed');
+      const fresh = !this.process;
       const state = this.process ?? this.start(root);
+      const budgetMs = fresh ? 2 * this.timeoutMs : this.timeoutMs;
       const abort = () => this.poison(state, asError(options.signal?.reason ?? new Error('worker request aborted')));
-      const timeout = setTimeout(() => this.poison(state, new Error(`worker timed out after ${this.timeoutMs}ms`)), this.timeoutMs);
+      const timeout = setTimeout(() => this.poison(state, new Error(`worker timed out after ${budgetMs}ms`)), budgetMs);
       options.signal?.addEventListener('abort', abort, { once: true });
       try {
         return await new Promise<ResearchPacketV1>((resolveReply, reject) => {
