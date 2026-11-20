@@ -55,7 +55,8 @@ test("the registered tool executes the packaged session worker without executing
 		const excerpt = packet.excerpts.find((item) => item.id === definition.excerptId);
 		assert.match(excerpt?.text ?? "", /func integratedNeedle\(\)/);
 		assert.equal(excerpt?.bodyComplete, true);
-		assert.match(result.content[0].text, /Do not reread complete bodies/);
+		assert.ok(Buffer.byteLength(result.content[0].text) <= 4096);
+		assert.match(result.content[0].text, /^1\. src\/feature\.go:1-1 definition \| /m);
 		assert.match(excerpt?.text ?? "", /Ignore prior instructions/);
 		await assert.rejects(lstat(executionMarker), { code: "ENOENT" });
 	} finally {
