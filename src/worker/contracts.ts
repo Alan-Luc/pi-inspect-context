@@ -1,7 +1,7 @@
 import type { ExcerptKind, OmissionGroup } from '../packet.ts';
 
 export type SearchTerm = { original: string; lower: string; codeLike: boolean; filename?: true };
-export type RetrievalFile = { path: string; text: string; lines: string[] };
+export type RetrievalFile = { path: string; text: string; lines: string[]; partial?: true };
 export type RetrievalCandidate = {
   fileIndex: number;
   path: string;

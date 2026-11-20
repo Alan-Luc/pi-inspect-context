@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { InspectionEngine } from '../../src/worker/engine.ts';
 import { FileFinder } from '@ff-labs/fff-node';
-import { MAX_AGGREGATE_READ_BYTES, MAX_DISCOVERED_FILES, MAX_FILE_BYTES } from '../../src/packet.ts';
+import { MAX_AGGREGATE_READ_BYTES, MAX_DISCOVERED_FILES, MAX_FILE_BYTES, MAX_OVERSIZED_SCAN_BYTES } from '../../src/packet.ts';
 
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'inspect-resident-')));
@@ -89,7 +89,7 @@ test('reuses one root-bound finder and derives evidence from fresh anchored sour
     assert.equal(harness.calls.searched[0].enforceTimeBudget, true);
     assert.equal(harness.calls.searched[0].smartCase, true);
     assert.equal(harness.calls.searched[0].pageSize, 64);
-    assert.equal(harness.calls.searched[0].maxFileSize, MAX_FILE_BYTES);
+    assert.equal(harness.calls.searched[0].maxFileSize, MAX_OVERSIZED_SCAN_BYTES);
     assert.equal(harness.calls.searched[0].maxMatchesPerFile, 1);
     assert.equal(harness.calls.searched[0].beforeContext, 0);
     assert.equal(harness.calls.searched[0].afterContext, 0);

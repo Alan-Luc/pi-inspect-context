@@ -188,7 +188,7 @@ export function prepareEvidenceWindow(file: RetrievalFile, window: RetrievalWind
     window.endLine = maxInt(last, window.startLine + MAX_EXCERPT_LINES - 1);
     window.startLine = maxInt(1, window.endLine - MAX_EXCERPT_LINES + 1);
   }
-  if ((kind !== 'definition' && kind !== 'caller') || expandedBodies.count >= maxExpandedEvidenceBodies) return window;
+  if ((kind !== 'definition' && kind !== 'caller') || file.partial || expandedBodies.count >= maxExpandedEvidenceBodies) return window;
   for (let start = anchor; start >= maxInt(1, anchor - MAX_EXCERPT_LINES + 1); start--) {
     const body = sourceBody(file, start);
     if (body.found && (kind !== 'caller' || (body.enclosed && body.endLine >= last))) {

@@ -99,7 +99,60 @@ test('accounts for binary, invalid UTF-8, and oversized files', async () => {
       assert.equal(reasons.get('binary_file'), 1);
       assert.equal(reasons.get('invalid_utf8'), 1);
       assert.equal(reasons.get('oversized_file'), 1);
-      assert.equal(packet.receipt.bytesRead, 15);
+      assert.equal(packet.receipt.bytesRead, 15 + 65_537);
+    } finally { await engine.close(); }
+  });
+});
+
+function oversizedSource(definitionLine, filler = 'const filler = 1;\n') {
+  const lines = Array.from({ length: 4000 }, () => filler);
+  lines[definitionLine - 1] = 'export function oversizedNeedle() {\n';
+  return lines.join('');
+}
+
+test('excerpts a match inside an oversized file with its true line number', async () => {
+  await fixture(async (root) => {
+    const source = oversizedSource(1500);
+    assert.ok(Buffer.byteLength(source) > 65_536);
+    await writeFile(join(root, 'big.ts'), source);
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'oversizedNeedle' }, { version: 1, root });
+      const found = packet.excerpts.find((item) => item.path === 'big.ts');
+      assert.ok(found, 'oversized file must produce an excerpt');
+      assert.ok(found.startLine <= 1500 && found.endLine >= 1500);
+      assert.equal(found.text.split('\n')[1500 - found.startLine], 'export function oversizedNeedle() {');
+      assert.equal(found.bodyComplete, false);
+      assert.notEqual(packet.unknowns[0], 'No lexical matches; retry with an exact symbol, route, config key, or path fragment.');
+    } finally { await engine.close(); }
+  });
+});
+
+test('excerpts an oversized tracked file in a Git repository', async () => {
+  await fixture(async (root) => {
+    await writeFile(join(root, 'big.ts'), oversizedSource(3000));
+    await execute('git', ['init', '--quiet'], { cwd: root });
+    await execute('git', ['add', '-A'], { cwd: root });
+    await execute('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'oversizedNeedle' }, { version: 1, root });
+      assert.ok(packet.excerpts.some((item) => item.path === 'big.ts' && item.startLine <= 3000 && item.endLine >= 3000));
+    } finally { await engine.close(); }
+  });
+});
+
+test('omits oversized files that are binary, undecodable, beyond the scan cap, or one huge line', async () => {
+  await fixture(async (root) => {
+    await writeFile(join(root, 'binary.bin'), Buffer.concat([Buffer.from('oversizedNeedle\0'), Buffer.alloc(70_000, 0x61)]));
+    await writeFile(join(root, 'invalid.txt'), Buffer.concat([Buffer.from('oversizedNeedle\n'), Buffer.alloc(70_000, 0xff)]));
+    await writeFile(join(root, 'huge.txt'), Buffer.alloc(1_048_577, 0x61));
+    await writeFile(join(root, 'line.js'), `oversizedNeedle ${'a'.repeat(70_000)}`);
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'oversizedNeedle' }, { version: 1, root });
+      assert.equal(packet.excerpts.length, 0);
+      assert.equal(packet.omissions.find((item) => item.reason === 'oversized_file')?.count, 4);
     } finally { await engine.close(); }
   });
 });

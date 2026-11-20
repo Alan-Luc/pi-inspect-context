@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
-import { MAX_EVIDENCE_PER_CATEGORY, MAX_EXCERPTS, MAX_EXCERPT_LINES, MAX_OMISSION_EXAMPLES, MAX_UNKNOWNS, POLICY_VERSION, InspectContextError, type EvidenceRef, type Excerpt, type ExcerptKind, type OmissionGroup, type OmissionReason, type ResearchPacketV1 } from '../packet.ts';
+import { MAX_EVIDENCE_PER_CATEGORY, MAX_EXCERPTS, MAX_EXCERPT_LINES, MAX_FILE_BYTES, MAX_OMISSION_EXAMPLES, MAX_UNKNOWNS, POLICY_VERSION, InspectContextError, type EvidenceRef, type Excerpt, type ExcerptKind, type OmissionGroup, type OmissionReason, type ResearchPacketV1 } from '../packet.ts';
 import { memberDefinitionPatterns, prepareEvidenceWindow } from './body.ts';
 import type { EvidenceInput, GitCandidate, MatchCategory, RetrievalCandidate, RetrievalFile, RetrievalWindow, SearchTerm } from './contracts.ts';
 
@@ -12,6 +12,7 @@ const maxEvaluationsPerFile = 64;
 const maxCandidates = MAX_EXCERPTS * 4;
 const maxEvaluations = 2_000 * (maxEvaluationsPerFile + maxSearchTerms);
 const contextRadius = 2;
+const oversizedLinesPerTerm = 64;
 const primaryWindowLimit = 24;
 const targetPacketBytes = 32_768;
 const stopWords = new Set('a an and are as at be by for from how in is it its of on or that the this through to under what where which with'.split(' '));
@@ -37,6 +38,22 @@ function merge(left: number[], right: number[]): number[] {
 }
 export function sourceLines(value: string): string[] {
   return value.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+}
+export function partialSourceFile(path: string, text: string, terms: SearchTerm[]): { file?: RetrievalFile; skippedLongLines: number } {
+  const lines = sourceLines(text);
+  const kept = new Set<number>();
+  const keptPerTerm = terms.map(() => 0);
+  let skippedLongLines = 0;
+  for (const [index, line] of lines.entries()) {
+    if (line.length > MAX_FILE_BYTES) { skippedLongLines++; continue; }
+    const matched = matchingSearchTerms(lower(line), terms).filter(term => keptPerTerm[term] < oversizedLinesPerTerm);
+    if (!matched.length) continue;
+    for (const term of matched) keptPerTerm[term]++;
+    for (let near = Math.max(0, index - contextRadius); near <= Math.min(lines.length - 1, index + contextRadius); near++) kept.add(near);
+  }
+  if (!kept.size) return { skippedLongLines };
+  const windowed = lines.slice(0, Math.max(...kept) + 1).map((line, index) => kept.has(index) ? line : '');
+  return { file: { path, text: windowed.join(''), lines: windowed, partial: true }, skippedLongLines };
 }
 export function exclusionReasonForDirectory(value: string): OmissionReason | undefined {
   for (const component of value.split('/')) {

@@ -5,11 +5,11 @@ import { createHash } from 'node:crypto';
 import { Value } from 'typebox/value';
 import { acquireNativeFiles, NativeFileError, openAt, readDirectory, statAt, type FileMetadata } from './native-files.ts';
 import { parseGitLine, parseGitPaths, parseGitMatchPaths, parseGitStatusPaths, runGit, safeRepositoryPath, type GitOutput } from './git.ts';
-import { buildEvidencePacket, extractSearchTerms, matchingSearchTerms, matchingPathTerms, orderGitCandidates, exclusionReason, exclusionReasonForDirectory, lowercaseSearchText, Omissions, sourceLines } from './retrieval.ts';
+import { buildEvidencePacket, extractSearchTerms, matchingSearchTerms, matchingPathTerms, orderGitCandidates, exclusionReason, exclusionReasonForDirectory, lowercaseSearchText, Omissions, partialSourceFile, sourceLines } from './retrieval.ts';
 import type { GitCandidate, RetrievalFile } from './contracts.ts';
 import { PrivateStatusIndex } from './status-index.ts';
 import { ResidentDiscovery, type FinderFactory } from './resident-discovery.ts';
-import { AUTHORIZATION_MANIFEST_SCHEMA, WORKER_REQUEST_SCHEMA, MAX_AGGREGATE_READ_BYTES, MAX_DISCOVERED_FILES, MAX_FILE_BYTES, MAX_QUERY_BYTES, InspectContextError, type AuthorizationManifest, type OmissionReason, type ResearchPacketV1, type WorkerRequest } from '../packet.ts';
+import { AUTHORIZATION_MANIFEST_SCHEMA, WORKER_REQUEST_SCHEMA, MAX_AGGREGATE_READ_BYTES, MAX_DISCOVERED_FILES, MAX_FILE_BYTES, MAX_OVERSIZED_SCAN_BYTES, MAX_QUERY_BYTES, InspectContextError, type AuthorizationManifest, type OmissionReason, type ResearchPacketV1, type WorkerRequest } from '../packet.ts';
 
 const fileTypeMask = 0o170000n;
 const directoryType = 0o040000n;
@@ -132,8 +132,8 @@ function openMetadataReader(root: number): MetadataReader {
 function openPath(root: number, path: string, directory = false): number {
   return withParent(root, path, (parent, name) => openAt(parent, name, directory));
 }
-function readBounded(descriptor: number): Buffer {
-  const bytes = Buffer.alloc(MAX_FILE_BYTES + 1);
+function readBounded(descriptor: number, limit: number): Buffer {
+  const bytes = Buffer.alloc(limit + 1);
   let length = 0;
   while (length < bytes.length) {
     const count = readSync(descriptor, bytes, length, bytes.length - length, null);
@@ -388,6 +388,7 @@ export class InspectionEngine {
       let discoveredFiles = 0;
       let readFiles = 0;
       let bytesRead = 0;
+      const unmatchedOversized = new Set<string>();
       const admittedFiles = new Map<string, RetrievalFile | null>();
       const readOnce = (entry: InventoryEntry, expectedMetadata?: FileMetadata): RetrievalFile | undefined => {
         signal?.throwIfAborted();
@@ -396,7 +397,8 @@ export class InspectionEngine {
         try { expected = entry.metadata ?? expectedMetadata ?? metadataAt(root, entry.path); }
         catch (error) { throw new InspectContextError('snapshot_changed', `inspect ${JSON.stringify(entry.path)} before read: ${errorMessage(error)}`); }
         if (!isType(expected, regularType)) throw new InspectContextError('snapshot_changed', `file is not regular: ${entry.path}`);
-        if (expected.size > BigInt(MAX_FILE_BYTES)) { omissions.add('oversized_file', 1, [entry.path]); return; }
+        const oversized = expected.size > BigInt(MAX_FILE_BYTES);
+        if (expected.size > BigInt(MAX_OVERSIZED_SCAN_BYTES)) { omissions.add('oversized_file', 1, [entry.path]); return; }
         if (BigInt(bytesRead) + expected.size > BigInt(MAX_AGGREGATE_READ_BYTES)) { omissions.add('aggregate_byte_limit', 1, [entry.path]); return; }
         let descriptor: number;
         try { descriptor = openPath(root, entry.path); }
@@ -410,7 +412,7 @@ export class InspectionEngine {
         try {
           if (!sameMetadata(descriptorMetadata(descriptor), expected)) throw new InspectContextError('snapshot_changed', `file changed before read: ${entry.path}`);
           const readStarted = performance.now();
-          try { bytes = readBounded(descriptor); }
+          try { bytes = readBounded(descriptor, oversized ? MAX_OVERSIZED_SCAN_BYTES : MAX_FILE_BYTES); }
           catch (error) {
             if (error instanceof InspectContextError) throw error;
             omissions.add('read_error', 1, [entry.path]);
@@ -422,10 +424,17 @@ export class InspectionEngine {
         readFiles++;
         bytesRead += bytes.length;
         accepted.set(entry.path, after);
-        if (bytes.includes(0)) { omissions.add('binary_file', 1, [entry.path]); return; }
+        if (bytes.includes(0)) { omissions.add(oversized ? 'oversized_file' : 'binary_file', 1, [entry.path]); return; }
         let text: string;
         try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
-        catch { omissions.add('invalid_utf8', 1, [entry.path]); return; }
+        catch { omissions.add(oversized ? 'oversized_file' : 'invalid_utf8', 1, [entry.path]); return; }
+        if (oversized) {
+          const { file: partial, skippedLongLines } = partialSourceFile(entry.path, text, terms);
+          if (skippedLongLines) omissions.add('oversized_file', 1, [entry.path]);
+          if (!partial) { unmatchedOversized.add(entry.path); return; }
+          files.push(partial);
+          return partial;
+        }
         const file = { path: entry.path, text, lines: sourceLines(text) };
         files.push(file);
         return file;
@@ -457,7 +466,7 @@ export class InspectionEngine {
             let metadata: FileMetadata;
             try {
               metadata = entry.metadata ?? metadataAt(root, path);
-              if (!isType(metadata, regularType) || metadata.size > BigInt(MAX_FILE_BYTES)) continue;
+              if (!isType(metadata, regularType) || metadata.size > BigInt(MAX_OVERSIZED_SCAN_BYTES)) continue;
             } catch { continue; }
             const file = admit(entry, metadata);
             if (!file) continue;
@@ -499,7 +508,7 @@ export class InspectionEngine {
           const entry = byPath.get(candidate.path);
           if (!entry) throw new InspectContextError('scan', 'ordered candidate is absent from inventory');
           admit(entry);
-          admittedCandidates++;
+          if (!unmatchedOversized.has(entry.path)) admittedCandidates++;
         }
       } else {
         const ordered = [...eligible].sort((a, b) => (initial.kind === 'git' ? Number(initial.worktree.has(b.path)) - Number(initial.worktree.has(a.path)) : 0) || compareText(a.path, b.path))

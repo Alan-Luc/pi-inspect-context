@@ -56,7 +56,7 @@ async function fixture(change) {
     await execute(git, ['add', '--', '.'], { cwd: root, env: gitEnvironment });
     await execute(git, ['-c', 'user.name=Snapshot Test', '-c', 'user.email=snapshot@example.invalid', 'commit', '--quiet', '-m', 'fixture'], { cwd: root, env: gitEnvironment });
     const initialHead = (await execute(git, ['rev-parse', 'HEAD'], { cwd: root, env: gitEnvironment })).stdout.trim();
-    if (change === 'oversized') await writeFile(join(root, 'new.ts'), Buffer.alloc(MAX_FILE_BYTES + 1, 120));
+    if (change === 'oversized') await writeFile(join(root, 'new.ts'), Buffer.concat([Buffer.from('snapshotNeedle\n'), Buffer.alloc(MAX_FILE_BYTES + 1, 120)]));
     const initialStatus = (await execute(git, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-renames'], { cwd: root, env: gitEnvironment })).stdout;
     if (change === 'sparse') await execute(git, ['sparse-checkout', 'set', '--cone', 'kept'], { cwd: root, env: gitEnvironment });
     const helper = join(parent, 'mutate.mjs');

@@ -1,5 +1,5 @@
 import type { FileFinderApi, InitOptions, MultiGrepOptions, Result } from '@ff-labs/fff-node';
-import { MAX_DISCOVERED_FILES, MAX_FILE_BYTES, InspectContextError } from '../packet.ts';
+import { MAX_DISCOVERED_FILES, MAX_OVERSIZED_SCAN_BYTES, InspectContextError } from '../packet.ts';
 import type { SearchTerm } from './contracts.ts';
 import { safeRepositoryPath } from './git.ts';
 
@@ -52,7 +52,7 @@ export class ResidentDiscovery {
         const options: NativeSearchOptions = {
           patterns,
           pageSize: maxPageSize,
-          maxFileSize: MAX_FILE_BYTES,
+          maxFileSize: MAX_OVERSIZED_SCAN_BYTES,
           maxMatchesPerFile: 1,
           timeBudgetMs: searchBudgetMs,
           enforceTimeBudget: true,
