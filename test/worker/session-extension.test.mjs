@@ -149,6 +149,36 @@ test('a real call during prewarm waits and succeeds', async () => {
   }
 });
 
+test('aborting a real call during prewarm rejects without waiting for prewarm', async () => {
+  const scratch = gitScratch();
+  const registered = registration();
+  try {
+    await registered.start(sessionStart, { cwd: scratch });
+    const controller = new AbortController();
+    const started = performance.now();
+    setTimeout(() => controller.abort(new Error('caller cancelled')), 20);
+    await assert.rejects(registered.tool.execute('abort', { query: 'needle' }, controller.signal, undefined, { cwd: scratch }), /caller cancelled/);
+    assert.ok(performance.now() - started < 100, `rejected after ${Math.round(performance.now() - started)}ms`);
+  } finally {
+    await registered.shutdown({ type: 'session_shutdown', reason: 'quit' });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a repeated session_start queues prewarm so an immediate call succeeds', async () => {
+  const scratch = gitScratch();
+  const registered = registration();
+  try {
+    await registered.start(sessionStart, { cwd: scratch });
+    await registered.start(sessionStart, { cwd: scratch });
+    const result = await registered.tool.execute('twice', { query: 'needle' }, undefined, undefined, { cwd: scratch });
+    assert.ok(result.details.excerpts.some(item => item.path === 'needle.ts'));
+  } finally {
+    await registered.shutdown({ type: 'session_shutdown', reason: 'quit' });
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
 test('shutdown during prewarm leaves no child process', async () => {
   const scratch = gitScratch();
   const spy = spyOnSpawn();

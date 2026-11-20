@@ -7,17 +7,27 @@ import { normalizeQuery } from '../src/packet.ts';
 import { renderModelEvidence } from '../src/session-model-evidence.ts';
 import { PersistentWorkerSession } from '../src/worker/worker-session.ts';
 
+function waitUnlessAborted(pending: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+  if (!signal) return pending;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    void pending.then(() => { signal.removeEventListener('abort', abort); resolve(); });
+  });
+}
+
 export function registerSessionInspectContext(pi: ExtensionAPI, options: Pick<InspectContextToolOptions, 'timeoutMs'> = {}): void {
   const session = new PersistentWorkerSession({ workerPath: fileURLToPath(new URL('../dist/worker.mjs', import.meta.url)), timeoutMs: options.timeoutMs });
   let prewarm: Promise<void> = Promise.resolve();
   const prewarmAbort = new AbortController();
   pi.on('session_start', (_event: unknown, ctx: ExtensionToolContext) => {
-    prewarm = (async () => {
+    prewarm = prewarm.then(async () => {
       const verified = realpathSync(ctx.cwd);
       if (nearestGitMarker(verified) === undefined) return;
       const root = await resolveInspectionRoot(verified, prewarmAbort.signal);
       await session.run({ root, query: 'prewarm' }, { signal: prewarmAbort.signal });
-    })().catch(() => {});
+    }).catch(() => {});
   });
   pi.on('session_shutdown', async () => { prewarmAbort.abort(); await session.close(); });
   pi.registerTool({
@@ -28,7 +38,7 @@ export function registerSessionInspectContext(pi: ExtensionAPI, options: Pick<In
       const root = await resolveInspectionRoot(ctx.cwd, signal);
       const cwd = relative(root, realpathSync(ctx.cwd)).split(sep).join('/') || '.';
       const rootResolutionMs = Math.max(0, performance.now() - rootResolutionStarted);
-      await prewarm;
+      await waitUnlessAborted(prewarm, signal);
       const packet = await session.run({ root, query, cwd }, { signal });
       packet.receipt.stageDurationsMs = { ...packet.receipt.stageDurationsMs, rootResolution: rootResolutionMs };
       const renderingStarted = performance.now();
