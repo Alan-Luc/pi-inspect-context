@@ -139,6 +139,20 @@ function isTestPath(value: string): boolean {
   const basename = posix.basename(name);
   return /(^|\/)(test|tests|__tests__|feature_tests|integration-tests|integration_tests)\//.test(name) || name.endsWith('_test.go') || name.includes('.test.') || name.includes('.spec.') || basename.endsWith('.py') && (basename.startsWith('test_') || basename.endsWith('_test.py'));
 }
+function isDocumentationPath(value: string): boolean {
+  const name = lower(value);
+  return /\.(md|mdx|rst|txt|adoc)$/.test(name) || /(^|\/)(doc|docs)\//.test(name);
+}
+const testKeywords = new Set(['test', 'tests', 'spec']);
+const documentationKeywords = new Set(['doc', 'docs']);
+function demotePath(value: string, terms: SearchTerm[]): boolean {
+  const test = isTestPath(value);
+  if (!test && !isDocumentationPath(value)) return false;
+  const keywords = test ? testKeywords : documentationKeywords;
+  const basename = lower(posix.basename(value));
+  const stem = basename.slice(0, basename.length - posix.extname(basename).length);
+  return !terms.some(term => keywords.has(term.lower) || term.lower === basename || term.lower === stem);
+}
 function isConfigurationPath(value: string): boolean {
   return /\.(json|yaml|yml|toml|ini|xml|config|env)$/.test(lower(value)) || governingName(value);
 }
@@ -418,7 +432,8 @@ function readingRole(window: RetrievalWindow, files: RetrievalFile[], terms: Sea
   }
   return role;
 }
-function selectWindows(ranked: RetrievalWindow[], files: RetrievalFile[], terms: SearchTerm[]): RetrievalWindow[] {
+function selectWindows(candidates: RetrievalWindow[], files: RetrievalFile[], terms: SearchTerm[]): RetrievalWindow[] {
+  const ranked = [...candidates.filter(window => !demotePath(window.path, terms)), ...candidates.filter(window => demotePath(window.path, terms))];
   let ordered = ranked;
   if (terms.length && terms.every(term => term.codeLike && !term.original.startsWith('/'))) {
     const definitions = ranked.filter(window => readingRole(window, files, terms) === 'definition');

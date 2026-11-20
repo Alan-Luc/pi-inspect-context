@@ -171,3 +171,12 @@ test('a common filename token surfaces one named file without crowding out the c
   assert.notEqual(ranked[0], 'docs/banana.md');
   assert.equal(ranked.slice(0, 2).filter(path => path.endsWith('/index.ts')).length, 1);
 });
+
+test('code files precede test and doc files with equal matches unless the query names them', () => {
+  const sources = { 'a.md': 'renderWidget\n', 'b.test.ts': 'renderWidget();\n', 'src/lib/z.ts': 'renderWidget();\n' };
+  const paths = query => packet(query, sources).excerpts.map(excerpt => excerpt.path);
+  assert.equal(paths('renderWidget')[0], 'src/lib/z.ts');
+  assert.deepEqual(paths('renderWidget').slice(1).sort(), ['a.md', 'b.test.ts']);
+  assert.equal(paths('renderWidget tests')[0], 'b.test.ts');
+  assert.equal(paths('renderWidget docs')[0], 'a.md');
+});
