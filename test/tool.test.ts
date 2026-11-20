@@ -39,7 +39,9 @@ test("registers the closed-world read-only tool metadata", async () => {
 		assert.equal(tool.outputSchema, RESEARCH_PACKET_V1_SCHEMA);
 		assert.equal(Value.Check(INSPECT_CONTEXT_PARAMETERS, { query: "needle" }), true);
 		assert.equal(Value.Check(INSPECT_CONTEXT_PARAMETERS, { query: "needle", root: "/tmp" }), false);
-		assert.match(tool.description, /bounded lexical/);
+		assert.match(tool.description, /Call this first, before grep, find, or reading files/);
+		assert.match(tool.description, /skips \.harness, \.pi/);
+		assert.match(tool.description, /gitignored files, and paths outside the repository/);
 		assert.match(tool.description, /loadUserProfile/);
 		assert.match(tool.description, /\/health\/ready/);
 		assert.match(tool.description, /CACHE_CONFIG_PATH/);
