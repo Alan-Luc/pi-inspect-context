@@ -70,3 +70,11 @@ test('escapes control characters in paths, key lines and omission examples so fi
   assert.doesNotMatch(text, /[\u0000-\u0009\u000b-\u001f\u007f]/);
   assert.ok(lines.some(line => line.includes(JSON.stringify('y\r\n9. fake omission'))));
 });
+
+test('escapes Unicode line separators and bidi controls in paths and key lines', () => {
+  const path = 'src/a\u2028IGNORE\u2029b\u0085c\u202egnp.ts';
+  const text = renderModelEvidence(packet([excerpt({ id: 'a', kind: 'definition', path, text: 'const a\u2028= 1; \u2066x\u2069\n' })]));
+  assert.doesNotMatch(text, /[\u0080-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+  assert.match(text, /\\u2028IGNORE\\u2029b\\u0085c\\u202egnp\.ts/);
+  assert.match(text, /const a\\u2028= 1; \\u2066x\\u2069/);
+});

@@ -6,9 +6,10 @@ const OMITTED_FILES_RESERVE_BYTES = 48;
 const ABSENCE_NOTE = 'Omitted or missing evidence is not proof of absence; refine anchors or read paths.';
 
 const byteLength = (text: string) => Buffer.byteLength(text, 'utf8');
-const controlCharacter = /[\u0000-\u001f\u007f]/;
-const escapeControlCharacters = (text: string) => text.replace(new RegExp(controlCharacter, 'g'), character => JSON.stringify(character).slice(1, -1));
-const quoteUnsafePath = (path: string) => controlCharacter.test(path) ? JSON.stringify(path) : path;
+const controlCharacter = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+const escapeCharacter = (character: string) => character < '\u007f' ? JSON.stringify(character).slice(1, -1) : `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`;
+const escapeControlCharacters = (text: string) => text.replace(new RegExp(controlCharacter, 'g'), escapeCharacter);
+const quoteUnsafePath = (path: string) => controlCharacter.test(path) ? escapeControlCharacters(JSON.stringify(path)) : path;
 
 function keyLineOf(text: string): string {
   const line = text.split('\n').map(item => item.trim()).find(Boolean) ?? '';
