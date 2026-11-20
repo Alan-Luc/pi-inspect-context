@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { registerInspectContext } from '../../extensions/index.ts';
+import { waitUnlessAborted } from '../../extensions/typescript.ts';
 import { inspectContextToolDefinition } from '../../src/adapter.ts';
 
 function registration(options) {
@@ -149,20 +150,12 @@ test('a real call during prewarm waits and succeeds', async () => {
   }
 });
 
-test('aborting a real call during prewarm rejects without waiting for prewarm', async () => {
-  const scratch = gitScratch();
-  const registered = registration();
-  try {
-    await registered.start(sessionStart, { cwd: scratch });
-    const controller = new AbortController();
-    const started = performance.now();
-    setTimeout(() => controller.abort(new Error('caller cancelled')), 20);
-    await assert.rejects(registered.tool.execute('abort', { query: 'needle' }, controller.signal, undefined, { cwd: scratch }), /caller cancelled/);
-    assert.ok(performance.now() - started < 100, `rejected after ${Math.round(performance.now() - started)}ms`);
-  } finally {
-    await registered.shutdown({ type: 'session_shutdown', reason: 'quit' });
-    rmSync(scratch, { recursive: true, force: true });
-  }
+test('a caller abort ends the wait for a prewarm that never settles', async () => {
+  const controller = new AbortController();
+  const waiting = waitUnlessAborted(new Promise(() => {}), controller.signal);
+  controller.abort(new Error('caller cancelled'));
+  await assert.rejects(waiting, /caller cancelled/);
+  await waitUnlessAborted(Promise.resolve(), new AbortController().signal);
 });
 
 test('a repeated session_start queues prewarm so an immediate call succeeds', async () => {

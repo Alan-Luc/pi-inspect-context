@@ -7,7 +7,7 @@ import { normalizeQuery } from '../src/packet.ts';
 import { renderModelEvidence } from '../src/session-model-evidence.ts';
 import { PersistentWorkerSession } from '../src/worker/worker-session.ts';
 
-function waitUnlessAborted(pending: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
+export function waitUnlessAborted(pending: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
   if (!signal) return pending;
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
