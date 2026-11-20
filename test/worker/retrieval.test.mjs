@@ -159,3 +159,15 @@ test('a filename token beyond the term cap still surfaces the named file', () =>
   assert.ok(result.excerpts.some(excerpt => excerpt.path === 'tests/extension-load.test.ts'));
   assert.equal(result.excerpts[0].path, 'tests/extension-load.test.ts');
 });
+
+test('a common filename token surfaces one named file without crowding out the code anchor', () => {
+  const sources = Object.fromEntries(Array.from({ length: 40 }, (_, index) => [`pkg${index}/src/index.ts`, 'export * from "./x";\n']));
+  sources['src/user/profile.ts'] = 'export function loadUserProfile(id) {\n  return id;\n}\n';
+  sources['docs/banana.md'] = 'unrelated\n';
+  const result = packet('loadUserProfile index.ts a.md', sources);
+  verify(result);
+  const ranked = [...new Set(result.excerpts.map(excerpt => excerpt.path))];
+  assert.ok(ranked.indexOf('src/user/profile.ts') <= 1, ranked.slice(0, 5).join(', '));
+  assert.notEqual(ranked[0], 'docs/banana.md');
+  assert.equal(ranked.slice(0, 2).filter(path => path.endsWith('/index.ts')).length, 1);
+});

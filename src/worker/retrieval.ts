@@ -229,11 +229,13 @@ function scoreCandidate(candidate: RetrievalCandidate, terms: SearchTerm[], freq
     score += Math.max(1, highest - frequencies[index] + 1) * 1_000;
     if (terms[index].codeLike && candidate.contentTerms.includes(index)) score += 1_500_000;
   }
-  score += candidate.pathTerms.filter(index => terms[index].filename).length * 10_000_000_000;
   return score + candidate.pathTerms.length * 250_000 + (candidate.contentTerms.length > 0 ? 25_000 : 0) + (candidate.exact ? 1_000_000_000_000 : 0);
 }
 function compareCandidates(left: RetrievalCandidate, right: RetrievalCandidate): number {
   return right.score - left.score || left.path.split('/').length - right.path.split('/').length || compareText(left.path, right.path) || left.startLine - right.startLine || left.endLine - right.endLine || Number(right.exact) - Number(left.exact) || left.fileIndex - right.fileIndex;
+}
+function pathEndsWithSegment(path: string, segment: string): boolean {
+  return path === segment || path.endsWith(`/${segment}`);
 }
 function prioritizeCoverage(candidates: RetrievalCandidate[], terms: SearchTerm[], frequencies: number[], includeRare: boolean): RetrievalCandidate[] {
   const selected = new Set<RetrievalCandidate>();
@@ -244,7 +246,12 @@ function prioritizeCoverage(candidates: RetrievalCandidate[], terms: SearchTerm[
     ordered.push(candidate);
     for (const index of candidateTerms(candidate)) covered.add(index);
   };
-  for (const candidate of candidates) if (candidate.exact || candidate.pathTerms.some(index => terms[index].filename)) select(candidate);
+  for (const candidate of candidates) if (candidate.exact) select(candidate);
+  for (const term of terms) {
+    if (!term.filename) continue;
+    const named = candidates.find(candidate => !selected.has(candidate) && pathEndsWithSegment(lower(candidate.path), term.lower));
+    if (named) select(named);
+  }
   for (const index of coverageTerms(terms, frequencies, includeRare)) {
     if (covered.has(index)) continue;
     const candidate = candidates.find(candidate => !selected.has(candidate) && candidateTerms(candidate).includes(index));
