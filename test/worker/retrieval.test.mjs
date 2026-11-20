@@ -149,3 +149,13 @@ test('category and packet caps retain valid references and accurate omissions', 
   assert.ok(result.excerpts.length <= 64);
   assert.ok(result.omissions.some(omission => omission.reason === 'packet_limit'));
 });
+
+test('a filename token beyond the term cap still surfaces the named file', () => {
+  const query = '2026-11-10-plan.md active settings one two three four extension-load.test.ts';
+  const sources = Object.fromEntries(Array.from({ length: 12 }, (_, index) => [`tests/other-${index}.test.ts`, 'active settings one two three four\n']));
+  sources['tests/extension-load.test.ts'] = 'export const loaded = true;\n';
+  const result = packet(query, sources);
+  verify(result);
+  assert.ok(result.excerpts.some(excerpt => excerpt.path === 'tests/extension-load.test.ts'));
+  assert.equal(result.excerpts[0].path, 'tests/extension-load.test.ts');
+});

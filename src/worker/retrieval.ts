@@ -5,6 +5,7 @@ import { memberDefinitionPatterns, prepareEvidenceWindow } from './body.ts';
 import type { EvidenceInput, GitCandidate, MatchCategory, RetrievalCandidate, RetrievalFile, RetrievalWindow, SearchTerm } from './contracts.ts';
 
 const maxSearchTerms = 8;
+const maxNamedFiles = 3;
 const maxCandidatesPerFile = 8;
 const maxWindowsPerFile = 3;
 const maxEvaluationsPerFile = 64;
@@ -76,7 +77,13 @@ export function extractSearchTerms(query: string): SearchTerm[] {
   }
   flush();
   if (!terms.length && fallback) terms.push(fallback);
-  return terms;
+  const named = filenameTerms(query);
+  if (!named.length) return terms;
+  return [...terms.filter(term => !named.some(file => file.lower === term.lower)).slice(0, maxSearchTerms - named.length), ...named];
+}
+function filenameTerms(query: string): SearchTerm[] {
+  const names = query.split(/\s+/).filter(token => /^[\w@./-]*[\p{L}\p{N}_]\.[a-z][a-z0-9]{0,5}$/iu.test(token));
+  return [...new Set(names.map(lower))].slice(0, maxNamedFiles).map(name => ({ original: name, lower: name, codeLike: true, filename: true }));
 }
 function containsSearchTerm(value: string, term: SearchTerm): boolean {
   if (!term.lower.startsWith('/')) return value.includes(term.lower);
@@ -222,6 +229,7 @@ function scoreCandidate(candidate: RetrievalCandidate, terms: SearchTerm[], freq
     score += Math.max(1, highest - frequencies[index] + 1) * 1_000;
     if (terms[index].codeLike && candidate.contentTerms.includes(index)) score += 1_500_000;
   }
+  score += candidate.pathTerms.filter(index => terms[index].filename).length * 10_000_000_000;
   return score + candidate.pathTerms.length * 250_000 + (candidate.contentTerms.length > 0 ? 25_000 : 0) + (candidate.exact ? 1_000_000_000_000 : 0);
 }
 function compareCandidates(left: RetrievalCandidate, right: RetrievalCandidate): number {
@@ -236,10 +244,10 @@ function prioritizeCoverage(candidates: RetrievalCandidate[], terms: SearchTerm[
     ordered.push(candidate);
     for (const index of candidateTerms(candidate)) covered.add(index);
   };
-  for (const candidate of candidates) if (candidate.exact) select(candidate);
+  for (const candidate of candidates) if (candidate.exact || candidate.pathTerms.some(index => terms[index].filename)) select(candidate);
   for (const index of coverageTerms(terms, frequencies, includeRare)) {
     if (covered.has(index)) continue;
-    const candidate = candidates.find(candidate => !selected.has(candidate) && !candidate.exact && candidateTerms(candidate).includes(index));
+    const candidate = candidates.find(candidate => !selected.has(candidate) && candidateTerms(candidate).includes(index));
     if (candidate) select(candidate);
   }
   return [...ordered, ...candidates.filter(candidate => !selected.has(candidate))];
