@@ -52,7 +52,7 @@ export function partialSourceFile(path: string, text: string, terms: SearchTerm[
     for (let near = Math.max(0, index - contextRadius); near <= Math.min(lines.length - 1, index + contextRadius); near++) kept.add(near);
   }
   if (!kept.size) return { skippedLongLines };
-  const windowed = lines.slice(0, Math.max(...kept) + 1).map((line, index) => kept.has(index) ? line : '');
+  const windowed = lines.slice(0, Math.max(...kept) + 1).map((line, index) => kept.has(index) ? line : '\n');
   return { file: { path, text: windowed.join(''), lines: windowed, partial: true }, skippedLongLines };
 }
 export function exclusionReasonForDirectory(value: string): OmissionReason | undefined {

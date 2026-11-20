@@ -128,6 +128,23 @@ test('excerpts a match inside an oversized file with its true line number', asyn
   });
 });
 
+test('oversized excerpts keep every text line at its true line number', async () => {
+  await fixture(async (root) => {
+    const source = oversizedSource(5).split('\n').map((line, index) => line === 'const filler = 1;' ? `const filler${index + 1} = 1;` : line).join('\n');
+    await writeFile(join(root, 'big.ts'), source);
+    const actual = source.split('\n');
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'big oversizedNeedle' }, { version: 1, root });
+      const excerpts = packet.excerpts.filter((item) => item.path === 'big.ts');
+      assert.ok(excerpts.length > 0);
+      for (const excerpt of excerpts) {
+        excerpt.text.split('\n').forEach((line, offset) => { if (line) assert.equal(line, actual[excerpt.startLine - 1 + offset], `${excerpt.kind} ${excerpt.startLine}+${offset}`); });
+      }
+    } finally { await engine.close(); }
+  });
+});
+
 test('stops scanning oversized files once the per-request oversized budget is spent', async () => {
   await fixture(async (root) => {
     const source = oversizedSource(1500, 'const fillerValue = 1; // padding padding padding\n');
