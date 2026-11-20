@@ -143,6 +143,23 @@ test('rejects symlink candidates instead of reading outside content', async () =
   });
 });
 
+test('ignores untracked symlinks under excluded directories while keeping real candidates', async () => {
+  await fixture(async (root, parent) => {
+    await writeFile(join(parent, 'elsewhere.md'), 'outside\n');
+    await writeFile(join(root, 'source.ts'), 'export function keptNeedle() {}\n');
+    await mkdir(join(root, '.harness', 'reports'), { recursive: true });
+    await symlink(join(parent, 'elsewhere.md'), join(root, '.harness', 'reports', 'x.md'));
+    await execute('git', ['init', '--quiet'], { cwd: root });
+    await execute('git', ['add', 'source.ts'], { cwd: root });
+    await execute('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'keptNeedle' }, { version: 1, root });
+      assert.ok(packet.excerpts.some(item => item.path === 'source.ts'));
+    } finally { await engine.close(); }
+  });
+});
+
 for (const { query, pattern } of [{ query: 'DIAL_ID', pattern: 'dial_id\n' }, { query: 'WebSocketHeaders', pattern: 'websocketheaders\n' }]) {
   test(`sends Git grep the lowercase pattern for ${query} and keeps case-insensitive matches`, async () => {
     await fixture(async root => {

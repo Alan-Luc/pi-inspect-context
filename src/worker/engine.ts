@@ -195,6 +195,7 @@ async function verifyGitSnapshot(statusIndex: PrivateStatusIndex, rootPath: stri
   const reader = openMetadataReader(root);
   try {
     for (const path of initial.worktree) {
+      if (exclusionReason(path)) continue;
       const expected = entries.get(path)?.metadata;
       let metadata: FileMetadata;
       try { metadata = reader.metadataAt(path); }
@@ -292,6 +293,7 @@ async function collectInventory(statusIndex: PrivateStatusIndex, rootPath: strin
     for (const path of worktree) {
       const entry = byPath.get(path);
       if (!entry) throw new InspectContextError('inventory', 'Git status path is absent from inventory');
+      if (exclusionReason(path)) continue;
       try { entry.metadata = reader.metadataAt(path); }
       catch (error) {
         if (!hasErrorCode(error, 'ENOENT')) throw error;
