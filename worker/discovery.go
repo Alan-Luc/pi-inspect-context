@@ -73,6 +73,9 @@ func collectGitInventory(repository *openedRepository, revision *string) ([]inve
 	for _, path := range statusPaths {
 		worktreePaths[path] = struct{}{}
 		index := entryIndexes[path]
+		if entries[index].excluded != "" {
+			continue
+		}
 		info, lstatErr := lstatRepositoryPath(repository.root, path)
 		if errors.Is(lstatErr, fs.ErrNotExist) {
 			if entries[index].excluded == "" {
@@ -84,9 +87,6 @@ func collectGitInventory(repository *openedRepository, revision *string) ([]inve
 			return nil, "", nil, lstatErr
 		}
 		entries[index].info = info
-		if entries[index].excluded != "" {
-			continue
-		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil, "", nil, fmt.Errorf("candidate path %q is a symlink", path)
 		}
