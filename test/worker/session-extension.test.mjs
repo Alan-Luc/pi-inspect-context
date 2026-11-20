@@ -16,8 +16,8 @@ function registration(options) {
     registerTool(tool) { tools.push(tool); },
   }, options);
   assert.equal(tools.length, 1);
-  assert.deepEqual([...handlers.keys()], ['session_shutdown']);
-  return { tool: tools[0], shutdown: handlers.get('session_shutdown') };
+  assert.deepEqual([...handlers.keys()].sort(), ['session_shutdown', 'session_start']);
+  return { tool: tools[0], shutdown: handlers.get('session_shutdown'), start: handlers.get('session_start') };
 }
 function gone(pid) {
   try { process.kill(pid, 0); return false; }
@@ -83,6 +83,83 @@ test('registered tool owns lazy resources, returns exact fresh evidence, and rel
     if (registered) await registered.shutdown({ type: 'session_shutdown', reason: 'quit' });
     childProcess.spawn = original;
     syncBuiltinESMExports();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+function spyOnSpawn() {
+  const spawns = [];
+  const original = childProcess.spawn;
+  childProcess.spawn = (...args) => { const child = original(...args); spawns.push({ child, args }); return child; };
+  syncBuiltinESMExports();
+  return { spawns, restore() { childProcess.spawn = original; syncBuiltinESMExports(); } };
+}
+function gitScratch() {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'inspect-session-prewarm-')));
+  writeFileSync(join(scratch, 'needle.ts'), 'export const needle = 1;\n');
+  childProcess.execFileSync('git', ['init', '-q'], { cwd: scratch });
+  return scratch;
+}
+const sessionStart = { type: 'session_start', reason: 'startup' };
+
+test('session_start prewarms the worker in a Git root without blocking', async () => {
+  const scratch = gitScratch();
+  const spy = spyOnSpawn();
+  const registered = registration();
+  try {
+    await registered.start(sessionStart, { cwd: scratch });
+    const deadline = Date.now() + 5000;
+    const workers = () => spy.spawns.filter(s => s.args[1].includes('--session'));
+    while (workers().length === 0 && Date.now() < deadline) await new Promise(r => setTimeout(r, 20));
+    assert.equal(workers().length, 1);
+  } finally {
+    await registered.shutdown({ type: 'session_shutdown', reason: 'quit' });
+    spy.restore();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('session_start spawns nothing outside a Git repository', async () => {
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'inspect-session-nogit-')));
+  const spy = spyOnSpawn();
+  const registered = registration();
+  try {
+    await registered.start(sessionStart, { cwd: scratch });
+    await new Promise(r => setTimeout(r, 300));
+    assert.equal(spy.spawns.length, 0);
+  } finally {
+    await registered.shutdown({ type: 'session_shutdown', reason: 'quit' });
+    spy.restore();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('a real call during prewarm waits and succeeds', async () => {
+  const scratch = gitScratch();
+  const spy = spyOnSpawn();
+  const registered = registration();
+  try {
+    await registered.start(sessionStart, { cwd: scratch });
+    const result = await registered.tool.execute('during', { query: 'needle' }, undefined, undefined, { cwd: scratch });
+    assert.ok(result.details.excerpts.some(item => item.path === 'needle.ts'));
+  } finally {
+    await registered.shutdown({ type: 'session_shutdown', reason: 'quit' });
+    spy.restore();
+    rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+test('shutdown during prewarm leaves no child process', async () => {
+  const scratch = gitScratch();
+  const spy = spyOnSpawn();
+  const registered = registration();
+  try {
+    await registered.start(sessionStart, { cwd: scratch });
+    await registered.shutdown({ type: 'session_shutdown', reason: 'quit' });
+    await new Promise(r => setTimeout(r, 500));
+    for (const spawned of spy.spawns) assert.ok(gone(spawned.child.pid));
+  } finally {
+    spy.restore();
     rmSync(scratch, { recursive: true, force: true });
   }
 });

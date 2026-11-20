@@ -124,7 +124,7 @@ function contained(root: string, child: string): boolean {
 	return value === "" || (value !== ".." && !value.startsWith(`..${sep}`) && !isAbsolute(value));
 }
 
-function nearestGitMarker(cwd: string): string | undefined {
+export function nearestGitMarker(cwd: string): string | undefined {
 	let current = cwd;
 	for (;;) {
 		const marker = join(current, ".git");
