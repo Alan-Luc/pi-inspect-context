@@ -162,7 +162,7 @@ function isDocumentationPath(value: string): boolean {
 }
 const testKeywords = new Set(['test', 'tests', 'spec']);
 const documentationKeywords = new Set(['doc', 'docs']);
-function demotePath(value: string, terms: SearchTerm[]): boolean {
+function shouldDemotePath(value: string, terms: SearchTerm[]): boolean {
   const test = isTestPath(value);
   if (!test && !isDocumentationPath(value)) return false;
   const keywords = test ? testKeywords : documentationKeywords;
@@ -450,7 +450,7 @@ function readingRole(window: RetrievalWindow, files: RetrievalFile[], terms: Sea
   return role;
 }
 function selectWindows(candidates: RetrievalWindow[], files: RetrievalFile[], terms: SearchTerm[]): RetrievalWindow[] {
-  const ranked = [...candidates.filter(window => !demotePath(window.path, terms)), ...candidates.filter(window => demotePath(window.path, terms))];
+  const ranked = [...candidates.filter(window => !shouldDemotePath(window.path, terms)), ...candidates.filter(window => shouldDemotePath(window.path, terms))];
   let ordered = ranked;
   if (terms.length && terms.every(term => term.codeLike && !term.original.startsWith('/'))) {
     const definitions = ranked.filter(window => readingRole(window, files, terms) === 'definition');
