@@ -7,8 +7,9 @@ import { join } from "node:path";
 import { assignSplit, selectInScopeLabels, normalizeQueryKey, rankModelVisiblePaths, scoreCase, summarize } from "../bench/replay/replay.mjs";
 
 test("rank uses first unique file in model-visible order", () => {
-	const text = JSON.stringify({ evidence: [{ path: "a" }, { path: "b" }, { path: "a" }, { path: "c" }] });
-	assert.deepEqual(rankModelVisiblePaths(text), ["a", "b", "c"]);
+	const text = "Untrusted text.\n1. a:1-2,5-6 definition,test | key\n2. dir/b c.ts:3-4 match | x\n3. c:1-1 test\n1 more file omitted.";
+	assert.deepEqual(rankModelVisiblePaths(text), ["a", "dir/b c.ts", "c"]);
+	assert.deepEqual(rankModelVisiblePaths(JSON.stringify({ evidence: [{ path: "a" }, { path: "b" }, { path: "a" }] })), ["a", "b"]);
 	assert.equal(scoreCase(["a", "b", "c"], ["c", "x"]).rank, 3);
 	assert.equal(scoreCase(["a"], ["z"]).rank, null);
 });

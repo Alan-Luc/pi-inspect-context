@@ -21,7 +21,13 @@ export function assignSplit(key) {
 }
 
 export function rankModelVisiblePaths(contentText) {
-	return [...new Set(JSON.parse(contentText).evidence.map((item) => item.path))];
+	if (contentText.startsWith("{")) return [...new Set(JSON.parse(contentText).evidence.map((item) => item.path))];
+	const paths = [];
+	for (const line of contentText.split("\n")) {
+		const match = /^\d+\. (.+?):\d+-\d+(?:,\d+-\d+)* /.exec(line);
+		if (match && !paths.includes(match[1])) paths.push(match[1]);
+	}
+	return paths;
 }
 
 export function scoreCase(rankedPaths, labels) {
@@ -138,8 +144,8 @@ export async function runReplay({ split, harvestPath = defaultHarvest, outputDir
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-	const index = process.argv.indexOf("--split");
-	const { report, outputPath, text, frozen } = await runReplay({ split: process.argv[index + 1] });
+	const option = (name) => { const index = process.argv.indexOf(name); return index < 0 ? undefined : process.argv[index + 1]; };
+	const { report, outputPath, text, frozen } = await runReplay({ split: option("--split"), outputDir: option("--output-dir"), adapterRoot: option("--adapter-root") });
 	const counts = { development: 0, holdout: 0 };
 	for (const item of frozen.cases) counts[item.split]++;
 	console.log(JSON.stringify({ counts, dropped: frozen.dropped, labels: frozen.labels }));
