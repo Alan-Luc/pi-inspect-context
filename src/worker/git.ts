@@ -100,7 +100,7 @@ export function parseGitStatusPaths(data: Buffer, inventory: Set<string>): strin
   return paths;
 }
 // Descriptor-relative Git startup belongs in the isolated worker because fchdir changes process-wide state.
-export async function runGit(rootDescriptor: number, args: string[], input = '', outputLimit = maxGitOutputBytes, signal?: AbortSignal): Promise<GitOutput> {
+export async function runGit(rootDescriptor: number, args: string[], input = '', outputLimit = maxGitOutputBytes, signal?: AbortSignal, privateIndex?: string): Promise<GitOutput> {
   signal?.throwIfAborted();
   const executable = gitExecutable ??= resolveGitExecutable(process.env.PATH || '/usr/bin:/bin');
   signal?.throwIfAborted();
@@ -109,8 +109,8 @@ export async function runGit(rootDescriptor: number, args: string[], input = '',
   try {
     changeDirectory(rootDescriptor);
     try {
-      child = spawn(executable, ['-c', 'core.fsmonitor=false', '--no-optional-locks', ...args], {
-        env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat' },
+      child = spawn(executable, ['-c', 'core.fsmonitor=false', ...(privateIndex ? [] : ['--no-optional-locks']), ...args], {
+        env: { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_PAGER: 'cat', ...(privateIndex ? { GIT_INDEX_FILE: privateIndex } : { GIT_OPTIONAL_LOCKS: '0' }) },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } finally {

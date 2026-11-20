@@ -7,6 +7,7 @@ import { acquireNativeFiles, NativeFileError, openAt, readDirectory, statAt, typ
 import { parseGitLine, parseGitPaths, parseGitMatchPaths, parseGitStatusPaths, runGit, safeRepositoryPath, type GitOutput } from './git.ts';
 import { buildEvidencePacket, extractSearchTerms, matchingSearchTerms, matchingPathTerms, orderGitCandidates, exclusionReason, exclusionReasonForDirectory, lowercaseSearchText, Omissions, sourceLines } from './retrieval.ts';
 import type { GitCandidate, RetrievalFile } from './contracts.ts';
+import { PrivateStatusIndex } from './status-index.ts';
 import { ResidentDiscovery, type FinderFactory } from './resident-discovery.ts';
 import { AUTHORIZATION_MANIFEST_SCHEMA, WORKER_REQUEST_SCHEMA, MAX_AGGREGATE_READ_BYTES, MAX_DISCOVERED_FILES, MAX_FILE_BYTES, MAX_QUERY_BYTES, InspectContextError, type AuthorizationManifest, type OmissionReason, type ResearchPacketV1, type WorkerRequest } from '../packet.ts';
 
@@ -171,11 +172,11 @@ function startGitRootCheck(rootPath: string, root: number, signal?: AbortSignal)
   check.catch(() => {});
   return check;
 }
-async function verifyGitSnapshot(rootPath: string, root: number, initial: GitInventory, signal?: AbortSignal): Promise<void> {
+async function verifyGitSnapshot(statusIndex: PrivateStatusIndex, rootPath: string, root: number, initial: GitInventory, signal?: AbortSignal): Promise<void> {
   const rootCheck = startGitRootCheck(rootPath, root, signal);
   const outcomes = await Promise.allSettled([
     runGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], '', 4096, signal),
-    runGit(root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-renames'], '', undefined, signal),
+    statusIndex.status(rootPath, root, signal),
     runGit(root, ['ls-files', '-t', '--cached', '-z'], '', undefined, signal),
   ]);
   await rootCheck;
@@ -214,7 +215,7 @@ async function verifyGitSnapshot(rootPath: string, root: number, initial: GitInv
     }
   } finally { reader.close(); }
 }
-async function collectInventory(rootPath: string, root: number, signal?: AbortSignal): Promise<Inventory> {
+async function collectInventory(statusIndex: PrivateStatusIndex, rootPath: string, root: number, signal?: AbortSignal): Promise<Inventory> {
   signal?.throwIfAborted();
   let marker: FileMetadata | undefined;
   try { marker = metadataAt(root, '.git'); }
@@ -252,7 +253,7 @@ async function collectInventory(rootPath: string, root: number, signal?: AbortSi
   const outcomes = await Promise.allSettled([
     runGit(root, ['rev-parse', '--verify', '--quiet', 'HEAD'], '', 4096, signal),
     runGit(root, ['ls-files', '-t', '--cached', '-z'], '', undefined, signal),
-    runGit(root, ['status', '--porcelain=v2', '-z', '--untracked-files=all', '--no-renames'], '', undefined, signal),
+    statusIndex.status(rootPath, root, signal),
   ]);
   await rootCheck;
   const [head, cached, status] = outcomes.map(outcome => {
@@ -312,6 +313,7 @@ export class InspectionEngine {
   private readonly release = acquireNativeFiles();
   private readonly resident: ResidentDiscovery;
   private readonly nativeIneligibleRoots = new Set<string>();
+  private readonly statusIndex = new PrivateStatusIndex();
   private closed = false;
   private active = 0;
   private readonly idle: (() => void)[] = [];
@@ -323,7 +325,7 @@ export class InspectionEngine {
       this.closing = (async () => {
         if (this.active > 0) await new Promise<void>(resolveIdle => this.idle.push(resolveIdle));
         try { await this.resident.close(); }
-        finally { this.release(); }
+        finally { this.statusIndex.close(); this.release(); }
       })();
     }
     await this.closing;
@@ -367,7 +369,7 @@ export class InspectionEngine {
       const rootIdentity = descriptorMetadata(root);
       const discoveryStarted = performance.now();
       let directReadsMs = 0;
-      const initial = await collectInventory(request.root, root, signal);
+      const initial = await collectInventory(this.statusIndex, request.root, root, signal);
       if (initial.kind === 'git' && initial.entries.length > MAX_DISCOVERED_FILES) this.nativeIneligibleRoots.add(request.root);
       else this.nativeIneligibleRoots.delete(request.root);
       const residentIdentity = `${rootIdentity.dev}:${rootIdentity.ino}:${initial.kind === 'git' ? initial.revision ?? 'unborn' : initial.fingerprint}`;
@@ -518,14 +520,14 @@ export class InspectionEngine {
         await this.resident.discard(request.root, residentIdentity);
       };
       if (initial.kind === 'git') {
-        try { await verifyGitSnapshot(request.root, root, initial, signal); }
+        try { await verifyGitSnapshot(this.statusIndex, request.root, root, initial, signal); }
         catch (error) {
           await discardIfRootReplaced();
           throw new InspectContextError('snapshot_changed', `final Git state: ${errorMessage(error)}`);
         }
       } else {
         let final: Inventory;
-        try { final = await collectInventory(request.root, root, signal); }
+        try { final = await collectInventory(this.statusIndex, request.root, root, signal); }
         catch (error) {
           await discardIfRootReplaced();
           throw new InspectContextError('snapshot_changed', `final inventory: ${errorMessage(error)}`);

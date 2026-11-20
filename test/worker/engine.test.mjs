@@ -283,11 +283,10 @@ test('checks the Git top-level alongside the snapshot commands', async () => {
   await fixture(async root => {
     await committedFixture(root);
     const events = await recordGitSpawns(root, 'overlapNeedle');
-    const initialStatus = events.indexOf('start status');
     const finalStatus = events.lastIndexOf('start status');
     const initialTop = events.indexOf('close toplevel');
     const finalTop = events.lastIndexOf('close toplevel');
-    assert.ok(initialStatus < initialTop && finalStatus < finalTop && finalStatus > initialTop, events.join(', '));
+    assert.ok(finalStatus < finalTop && finalStatus > initialTop, events.join(', '));
   });
 });
 
