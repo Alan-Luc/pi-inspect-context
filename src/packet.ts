@@ -6,6 +6,7 @@ export const MAX_QUERY_BYTES = 4_096;
 export const MAX_DISCOVERED_FILES = 2_000;
 export const MAX_FILE_BYTES = 65_536;
 export const MAX_OVERSIZED_SCAN_BYTES = 262_144;
+export const MAX_OVERSIZED_REQUEST_BYTES = 524_288;
 export const MAX_AGGREGATE_READ_BYTES = 8_388_608;
 export const MAX_EXCERPTS = 64;
 export const MAX_EXCERPT_LINES = 80;

@@ -9,7 +9,7 @@ import { buildEvidencePacket, extractSearchTerms, matchingSearchTerms, matchingP
 import type { GitCandidate, RetrievalFile } from './contracts.ts';
 import { PrivateStatusIndex } from './status-index.ts';
 import { ResidentDiscovery, type FinderFactory } from './resident-discovery.ts';
-import { AUTHORIZATION_MANIFEST_SCHEMA, WORKER_REQUEST_SCHEMA, MAX_AGGREGATE_READ_BYTES, MAX_DISCOVERED_FILES, MAX_FILE_BYTES, MAX_OVERSIZED_SCAN_BYTES, MAX_QUERY_BYTES, InspectContextError, type AuthorizationManifest, type OmissionReason, type ResearchPacketV1, type WorkerRequest } from '../packet.ts';
+import { AUTHORIZATION_MANIFEST_SCHEMA, WORKER_REQUEST_SCHEMA, MAX_AGGREGATE_READ_BYTES, MAX_DISCOVERED_FILES, MAX_FILE_BYTES, MAX_OVERSIZED_REQUEST_BYTES, MAX_OVERSIZED_SCAN_BYTES, MAX_QUERY_BYTES, InspectContextError, type AuthorizationManifest, type OmissionReason, type ResearchPacketV1, type WorkerRequest } from '../packet.ts';
 
 const fileTypeMask = 0o170000n;
 const directoryType = 0o040000n;
@@ -388,6 +388,7 @@ export class InspectionEngine {
       let discoveredFiles = 0;
       let readFiles = 0;
       let bytesRead = 0;
+      let oversizedBytesRead = 0;
       const unmatchedOversized = new Set<string>();
       const admittedFiles = new Map<string, RetrievalFile | null>();
       const readOnce = (entry: InventoryEntry, expectedMetadata?: FileMetadata): RetrievalFile | undefined => {
@@ -398,7 +399,7 @@ export class InspectionEngine {
         catch (error) { throw new InspectContextError('snapshot_changed', `inspect ${JSON.stringify(entry.path)} before read: ${errorMessage(error)}`); }
         if (!isType(expected, regularType)) throw new InspectContextError('snapshot_changed', `file is not regular: ${entry.path}`);
         const oversized = expected.size > BigInt(MAX_FILE_BYTES);
-        if (expected.size > BigInt(MAX_OVERSIZED_SCAN_BYTES)) { omissions.add('oversized_file', 1, [entry.path]); return; }
+        if (expected.size > BigInt(MAX_OVERSIZED_SCAN_BYTES) || oversized && BigInt(oversizedBytesRead) + expected.size > BigInt(MAX_OVERSIZED_REQUEST_BYTES)) { omissions.add('oversized_file', 1, [entry.path]); return; }
         if (BigInt(bytesRead) + expected.size > BigInt(MAX_AGGREGATE_READ_BYTES)) { omissions.add('aggregate_byte_limit', 1, [entry.path]); return; }
         let descriptor: number;
         try { descriptor = openPath(root, entry.path); }
@@ -423,6 +424,7 @@ export class InspectionEngine {
         } finally { closeSync(descriptor); }
         readFiles++;
         bytesRead += bytes.length;
+        if (oversized) oversizedBytesRead += bytes.length;
         accepted.set(entry.path, after);
         if (bytes.includes(0)) { omissions.add(oversized ? 'oversized_file' : 'binary_file', 1, [entry.path]); return; }
         let text: string;

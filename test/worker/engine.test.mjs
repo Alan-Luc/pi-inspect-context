@@ -128,6 +128,21 @@ test('excerpts a match inside an oversized file with its true line number', asyn
   });
 });
 
+test('stops scanning oversized files once the per-request oversized budget is spent', async () => {
+  await fixture(async (root) => {
+    const source = oversizedSource(1500, 'const fillerValue = 1; // padding padding padding\n');
+    assert.ok(Buffer.byteLength(source) > 180_000 && Buffer.byteLength(source) < 262_144);
+    for (const name of ['a.ts', 'b.ts', 'c.ts', 'd.ts']) await writeFile(join(root, name), source);
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'oversizedNeedle' }, { version: 1, root });
+      assert.deepEqual([...new Set(packet.excerpts.map((item) => item.path))].sort(), ['a.ts', 'b.ts']);
+      assert.equal(packet.omissions.find((item) => item.reason === 'oversized_file')?.count, 2);
+      assert.ok(packet.receipt.bytesRead <= 524_288);
+    } finally { await engine.close(); }
+  });
+});
+
 test('excerpts an oversized tracked file in a Git repository', async () => {
   await fixture(async (root) => {
     await writeFile(join(root, 'big.ts'), oversizedSource(3000));
