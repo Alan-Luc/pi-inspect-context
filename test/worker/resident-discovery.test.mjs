@@ -220,6 +220,7 @@ test('rejects symlink and outside native nominations while preserving admitted s
   execFileSync('git', ['-c', 'user.name=Resident Test', '-c', 'user.email=resident@example.invalid', 'commit', '--quiet', '-m', 'fixture'], { cwd: root });
   const harness = finderHarness({ paths: ['link.ts', '../secret.ts', 'safe.ts'], indexedPaths: ['link.ts', 'safe.ts'], resultMetadata: { totalFiles: 2, filteredFileCount: 2, totalFilesSearched: 2, nextCursor: null } });
   const engine = new InspectionEngine({ createFinder: harness.createFinder });
+  engine.nativeEligibleRoots.add(root);
   try {
     await withGitSpy(async calls => {
       const packet = await engine.inspect({ version: 1, root, query: 'residentNeedle' }, { version: 1, root });
@@ -240,6 +241,7 @@ test('destroys the finder after root replacement invalidates the active snapshot
     writeFileSync(join(root, 'src', 'needle.ts'), 'replacement root content\n');
   } });
   const engine = new InspectionEngine({ createFinder: harness.createFinder });
+  engine.nativeEligibleRoots.add(root);
   try {
     await withGitSpy(async calls => {
       await assert.rejects(engine.inspect({ version: 1, root, query: 'residentNeedle' }, { version: 1, root }), error => error.code === 'snapshot_changed');
@@ -265,6 +267,7 @@ test('rejects a tracked source mutation after real native nomination', async () 
       return result;
     };
     const engine = new InspectionEngine({ createFinder: () => created });
+    engine.nativeEligibleRoots.add(root);
     try {
       await withGitSpy(async calls => {
         await assert.rejects(engine.inspect({ version: 1, root, query: 'residentNeedle' }, { version: 1, root }), error => error.code === 'snapshot_changed');
@@ -280,6 +283,7 @@ test('uses native Git nominations without running Git grep or reading a path twi
   const source = 'export function residentNeedle() { return "fresh"; }\n';
   const harness = finderHarness({ paths: ['src/needle.ts', 'src/needle.ts'] });
   const engine = new InspectionEngine({ createFinder: harness.createFinder });
+  engine.nativeEligibleRoots.add(root);
   try {
     await withGitSpy(async calls => {
       const packet = await engine.inspect({ version: 1, root, query: 'residentNeedle' }, { version: 1, root });
@@ -300,6 +304,7 @@ test('uses fresh dirty and untracked source ahead of stale native nominations', 
   await writeFile(join(root, 'fresh-untracked.ts'), untracked);
   const harness = finderHarness({ paths: ['src/needle.ts'] });
   const engine = new InspectionEngine({ createFinder: harness.createFinder });
+  engine.nativeEligibleRoots.add(root);
   try {
     await withGitSpy(async calls => {
       const packet = await engine.inspect({ version: 1, root, query: 'dirtyFreshNeedle untrackedFreshNeedle' }, { version: 1, root });
@@ -323,6 +328,7 @@ test('retains repository candidates for scoped requests', async () => {
   execFileSync('git', ['-c', 'user.name=Resident Test', '-c', 'user.email=resident@example.invalid', 'commit', '--quiet', '-m', 'scope fixture'], { cwd: root });
   const harness = finderHarness({ paths: ['repositoryNeedle.ts'], indexedPaths: ['src/needle.ts', 'pkg/package.json', 'pkg/src/stale.ts', 'repositoryNeedle.ts'], resultMetadata: { totalFiles: 4, filteredFileCount: 4, totalFilesSearched: 4, nextCursor: null } });
   const engine = new InspectionEngine({ createFinder: harness.createFinder });
+  engine.nativeEligibleRoots.add(root);
   try {
     await withGitSpy(async calls => {
       const packet = await engine.inspect({ version: 1, root, cwd: 'pkg/src', query: 'repositoryNeedle' }, { version: 1, root });

@@ -314,7 +314,7 @@ async function collectInventory(statusIndex: PrivateStatusIndex, rootPath: strin
 export class InspectionEngine {
   private readonly release = acquireNativeFiles();
   private readonly resident: ResidentDiscovery;
-  private readonly nativeIneligibleRoots = new Set<string>();
+  private readonly nativeEligibleRoots = new Set<string>();
   private readonly statusIndex = new PrivateStatusIndex();
   private closed = false;
   private active = 0;
@@ -365,15 +365,15 @@ export class InspectionEngine {
       return greps;
     };
     // Git grep --cached reads only the index, so it can overlap inventory collection; the final snapshot check still covers it.
-    // Only roots last seen above the native admission limit start early, so native-served requests keep running no Git grep.
-    let termGreps = asciiTerms && this.nativeIneligibleRoots.has(request.root) ? startTermGreps() : undefined;
+    // Roots last seen within the native admission limit skip the early grep; unseen roots start it so a fresh worker overlaps status with grep.
+    let termGreps = asciiTerms && !this.nativeEligibleRoots.has(request.root) ? startTermGreps() : undefined;
     try {
       const rootIdentity = descriptorMetadata(root);
       const discoveryStarted = performance.now();
       let directReadsMs = 0;
       const initial = await collectInventory(this.statusIndex, request.root, root, signal);
-      if (initial.kind === 'git' && initial.entries.length > MAX_DISCOVERED_FILES) this.nativeIneligibleRoots.add(request.root);
-      else this.nativeIneligibleRoots.delete(request.root);
+      if (initial.kind === 'git' && initial.entries.length > MAX_DISCOVERED_FILES) this.nativeEligibleRoots.delete(request.root);
+      else this.nativeEligibleRoots.add(request.root);
       const residentIdentity = `${rootIdentity.dev}:${rootIdentity.ino}:${initial.kind === 'git' ? initial.revision ?? 'unborn' : initial.fingerprint}`;
       const scope = nearestScope(root, cwd, initial);
       if (!terms.length) throw new InspectContextError('protocol', 'query has no searchable terms');

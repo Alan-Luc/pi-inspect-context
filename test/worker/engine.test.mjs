@@ -368,7 +368,7 @@ async function committedFixture(root) {
   await execute('git', ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'initial'], { cwd: root });
 }
 
-test('starts Git grep before the inventory listing finishes once a root is known to exceed native admission', async () => {
+test('starts Git grep before the inventory listing finishes on a fresh worker and while a root exceeds native admission', async () => {
   await fixture(async root => {
     await mkdir(join(root, 'many'));
     await Promise.all(Array.from({ length: 2001 }, (_, index) => writeFile(join(root, 'many', `file${index}.txt`), `${index}\n`)));
@@ -376,7 +376,7 @@ test('starts Git grep before the inventory listing finishes once a root is known
     const events = await recordGitSpawns(root, 'overlapNeedle', 2);
     const first = events.slice(0, events.indexOf('request 1'));
     const second = events.slice(events.indexOf('request 1'));
-    assert.ok(first.indexOf('start grep') > first.indexOf('close ls-files'), first.join(', '));
+    assert.ok(first.indexOf('start grep') >= 0 && first.indexOf('start grep') < first.indexOf('close ls-files'), first.join(', '));
     assert.ok(second.indexOf('start grep') >= 0 && second.indexOf('start grep') < second.indexOf('close ls-files'), second.join(', '));
   });
 });
