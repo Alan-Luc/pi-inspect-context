@@ -22,6 +22,7 @@ test('lexical terms preserve Unicode tokenization, stop words, and slash boundar
     { original: '/health/ready', lower: '/health/ready', codeLike: true },
     { original: 'cache_refresh', lower: 'cache_refresh', codeLike: true },
   ]);
+  assert.deepEqual(extractSearchTerms('deploy 2026 v2 abc').map(term => [term.lower, term.codeLike]), [['deploy', false], ['2026', false], ['v2', true], ['abc', false]]);
   assert.deepEqual(extractSearchTerms('the and'), [{ original: 'the', lower: 'the', codeLike: false }]);
   assert.deepEqual(extractSearchTerms('İΣΟΣ café café CAFÉ').map(term => term.lower), ['iσοσ', 'café']);
   const terms = extractSearchTerms('/health');

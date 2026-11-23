@@ -77,7 +77,7 @@ export function extractSearchTerms(query: string): SearchTerm[] {
     const original = current;
     current = '';
     if (!/[\p{L}\p{N}_]/u.test(original)) return;
-    const term = { original, lower: lower(original), codeLike: original.startsWith('/') || original.includes('_') || /[\p{Lu}\p{N}]/u.test(original) };
+    const term = { original, lower: lower(original), codeLike: original.startsWith('/') || original.includes('_') || /\p{Lu}/u.test(original) || /\p{N}/u.test(original) && !/^\p{N}+$/u.test(original) };
     if (stopWords.has(term.lower)) {
       fallback ??= term;
       return;
