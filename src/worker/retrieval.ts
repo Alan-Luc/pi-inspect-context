@@ -6,6 +6,7 @@ import type { EvidenceInput, GitCandidate, MatchCategory, RetrievalCandidate, Re
 
 const maxSearchTerms = 8;
 const maxNamedFiles = 6;
+const FILE_TERM_WEIGHT = 1_500_000;
 const maxCandidatesPerFile = 8;
 const maxWindowsPerFile = 3;
 const maxEvaluationsPerFile = 64;
@@ -373,6 +374,7 @@ function collectCandidates(files: RetrievalFile[], query: string, terms: SearchT
         add(1, 1, false, [], pathTerms);
       }
     }
+    for (const candidate of fileCandidates) candidate.score += fileTerms[fileIndex].length * FILE_TERM_WEIGHT;
     candidates.push(...fileCandidates);
   }
   candidates.sort(compareCandidates);

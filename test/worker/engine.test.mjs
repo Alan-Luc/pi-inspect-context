@@ -54,6 +54,18 @@ test('returns schema-shaped real evidence and rejects root authorization mismatc
   });
 });
 
+test('ranks a file covering more query terms above a file with one denser line', async () => {
+  await fixture(async (root) => {
+    await writeFile(join(root, 'aaa.ts'), 'const x = alphaterm + betaterm + gammaterm;\n');
+    await writeFile(join(root, 'zzz.ts'), 'const a = alphaterm;\nconst b = betaterm;\nconst c = gammaterm;\nconst d = deltaterm;\nconst e = epsilonterm;\n');
+    const engine = new InspectionEngine();
+    try {
+      const packet = await engine.inspect({ version: 1, root, query: 'alphaterm betaterm gammaterm deltaterm epsilonterm' }, { version: 1, root });
+      assert.equal(packet.excerpts[0].path, 'zzz.ts');
+    } finally { await engine.close(); }
+  });
+});
+
 test('retains every independently labeled public fixture fact', async () => {
   const base = fileURLToPath(new URL('../../bench/fixtures', import.meta.url));
   await fixture(async (_unused, parent) => {
