@@ -16,7 +16,7 @@ const contextRadius = 2;
 const oversizedLinesPerTerm = 64;
 const primaryWindowLimit = 24;
 const targetPacketBytes = 32_768;
-const stopWords = new Set('a an and are as at be by for from how in is it its of on or that the this through to under what where which with'.split(' '));
+const stopWords = new Set('a an and are as at be by for from how in is it its of on or that the this through to under what where which with flow logic handle code implementation does'.split(' '));
 const dependencyDirectories = new Set(['.git', '.harness', '.opencode', '.pi', '.claude', '.cursor', 'node_modules', 'vendor', 'third_party', 'deps', 'Pods']);
 const generatedDirectories = new Set(['dist', 'build', 'out', 'target', 'coverage', '.cache', '.next', 'tmp', 'bin', 'generated']);
 const governingNames = new Set(['AGENTS.md', 'README', 'README.md', 'README.txt', 'package.json', 'go.mod', 'Cargo.toml', 'pyproject.toml', 'Makefile', 'CMakeLists.txt', 'pom.xml', 'build.gradle']);
@@ -374,7 +374,7 @@ function collectCandidates(files: RetrievalFile[], query: string, terms: SearchT
         add(1, 1, false, [], pathTerms);
       }
     }
-    for (const candidate of fileCandidates) candidate.score += fileTerms[fileIndex].length * FILE_TERM_WEIGHT;
+    for (const candidate of fileCandidates) candidate.score += fileTerms[fileIndex].reduce((sum, index) => sum + FILE_TERM_WEIGHT * (terms[index].codeLike ? 1 : 0.5 + (highest - frequencies[index]) / Math.max(1, highest)), 0);
     candidates.push(...fileCandidates);
   }
   candidates.sort(compareCandidates);

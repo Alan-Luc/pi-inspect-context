@@ -31,6 +31,10 @@ test('lexical terms preserve Unicode tokenization, stop words, and slash boundar
   assert.deepEqual(matchingPathTerms('src/health.ts', terms), [0]);
 });
 
+test('generic prose words are dropped from search terms', () => {
+  assert.deepEqual(extractSearchTerms('where does the flow logic handle code implementation of retryQueue').map(term => term.lower), ['retryqueue']);
+});
+
 test('lowercase search text preserves ASCII and character-wise Unicode behavior', () => {
   for (const [input, expected] of [
     ['ASCII Search 123', 'ascii search 123'],
