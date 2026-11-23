@@ -60,6 +60,14 @@ test('Git ordering reserves exact paths and the best rare-term covering candidat
   assert.deepEqual(orderGitCandidates(candidates, 'missing', terms, [3, 2], 0), []);
 });
 
+test('Git ordering admits every named file ahead of denser candidates', () => {
+  const query = 'a.ts b.ts c.ts d.ts e.ts f.ts shared';
+  const terms = extractSearchTerms(query);
+  const named = ['a', 'b', 'c', 'd', 'e', 'f'].map(name => ({ path: `src/${name}.ts`, contentTerms: [], pathTerms: [terms.findIndex(term => term.lower === `${name}.ts`)] }));
+  const dense = { path: 'dense.ts', contentTerms: [terms.findIndex(term => term.lower === 'shared')], pathTerms: [] };
+  assert.deepEqual(orderGitCandidates([dense, ...named], query, terms, [1, 1, 1, 1, 1, 1, 1], 6).map(item => item.path).sort(), named.map(item => item.path));
+});
+
 test('exclusions and source line endings match the frozen engine', () => {
   assert.equal(exclusionReason('vendor/lib/a.go'), 'dependency_or_vendor');
   assert.equal(exclusionReasonForDirectory('src/generated'), 'generated_or_build');

@@ -5,7 +5,7 @@ import { memberDefinitionPatterns, prepareEvidenceWindow } from './body.ts';
 import type { EvidenceInput, GitCandidate, MatchCategory, RetrievalCandidate, RetrievalFile, RetrievalWindow, SearchTerm } from './contracts.ts';
 
 const maxSearchTerms = 8;
-const maxNamedFiles = 3;
+const maxNamedFiles = 6;
 const maxCandidatesPerFile = 8;
 const maxWindowsPerFile = 3;
 const maxEvaluationsPerFile = 64;
@@ -144,6 +144,11 @@ export function orderGitCandidates(candidates: GitCandidate[], query: string, te
     for (const index of candidateTerms(candidate)) covered.add(index);
   };
   for (const candidate of base) if (candidate.path.includes(query)) reserve(candidate);
+  for (const term of terms) {
+    if (!term.filename) continue;
+    const named = base.find(candidate => !selected.has(candidate) && pathEndsWithSegment(lower(candidate.path), term.lower));
+    if (named) reserve(named);
+  }
   for (const index of coverageTerms(terms, frequencies, true)) {
     if (covered.has(index)) continue;
     const candidate = base.find(candidate => !selected.has(candidate) && candidateTerms(candidate).includes(index));
