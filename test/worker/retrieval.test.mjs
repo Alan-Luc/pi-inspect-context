@@ -193,3 +193,11 @@ test('code files precede test and doc files with equal matches unless the query 
   assert.equal(paths('renderWidget tests')[0], 'b.test.ts');
   assert.equal(paths('renderWidget docs')[0], 'a.md');
 });
+
+test('a query term in the file basename outranks the same term in a directory name', () => {
+  const body = 'export const value = 1;\n';
+  const result = packet('recording', { 'recording/other.ts': body, 'src/use-recording.ts': body });
+  verify(result);
+  const paths = result.matches.map(reference => result.excerpts.find(excerpt => excerpt.id === reference.excerptId).path);
+  assert.ok(paths.indexOf('src/use-recording.ts') < paths.indexOf('recording/other.ts'), JSON.stringify(paths));
+});
