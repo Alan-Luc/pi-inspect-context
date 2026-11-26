@@ -11,15 +11,65 @@ const escapeCharacter = (character: string) => character < '\u007f' ? JSON.strin
 const escapeControlCharacters = (text: string) => text.replace(new RegExp(controlCharacter, 'g'), escapeCharacter);
 const quoteUnsafePath = (path: string) => controlCharacter.test(path) ? escapeControlCharacters(JSON.stringify(path)) : path;
 
-function keyLineOf(text: string): string {
-  const line = text.split('\n').map(item => item.trim()).find(Boolean) ?? '';
-  return escapeControlCharacters([...line].slice(0, MAX_KEY_LINE_CHARACTERS).join(''));
+type Excerpt = ResearchPacketV1['excerpts'][number];
+type FileEvidence = { ranges: string[]; kinds: string[]; excerpts: Excerpt[] };
+
+const MAX_MATCH_LINES = 4;
+const KIND_PRIORITY = ['definition', 'caller'];
+const definitionLine = /^\s*(?:export\s+|pub(?:\([^)]*\))?\s+|public\s+|private\s+|protected\s+|static\s+|async\s+|default\s+)*(?:(?:function\*?|def|fn|func|class|interface|struct|enum|trait|impl|type|module|object)\s+(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[\w$]+)\s*(?::[^=]+)?=>)/;
+
+function queryTerms(query: string): string[] {
+  return [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}_]+/u).filter(term => term.length >= 2))];
+}
+
+function numberedLines(excerpt: Excerpt) {
+  return excerpt.text.split('\n').map((text, index) => ({ line: excerpt.startLine + index, text }));
+}
+
+function matchLines(excerpt: Excerpt, terms: string[]) {
+  const scored = numberedLines(excerpt).map(item => ({ ...item, score: terms.filter(term => item.text.toLowerCase().includes(term)).length })).filter(item => item.score > 0);
+  const best = Math.max(0, ...scored.map(item => item.score));
+  return scored.filter(item => item.score === best);
+}
+
+const indentOf = (text: string) => text.length - text.trimStart().length;
+
+function enclosingDefinition(file: FileEvidence, match: { line: number; text: string }): string | undefined {
+  if (definitionLine.test(match.text)) return undefined;
+  let found: { line: number; name: string } | undefined;
+  for (const excerpt of file.excerpts) for (const item of numberedLines(excerpt)) {
+    const name = definitionLine.exec(item.text);
+    if (name && item.line < match.line && indentOf(item.text) < indentOf(match.text) && (!found || item.line > found.line)) found = { line: item.line, name: name[1] ?? name[2] };
+  }
+  return found?.name;
+}
+
+function clip(text: string): string {
+  return escapeControlCharacters([...text.trim()].slice(0, MAX_KEY_LINE_CHARACTERS).join(''));
+}
+
+function describeFile(file: FileEvidence, terms: string[]): string {
+  const ordered = [...file.excerpts];
+  const rank = (excerpt: Excerpt) => KIND_PRIORITY.includes(excerpt.kind) ? KIND_PRIORITY.indexOf(excerpt.kind) : KIND_PRIORITY.length;
+  ordered.sort((a, b) => rank(a) - rank(b));
+  const keyExcerpt = ordered.find(excerpt => matchLines(excerpt, terms).length > 0);
+  if (!keyExcerpt) {
+    const first = file.excerpts[0].text.split('\n').map(item => item.trim()).find(Boolean) ?? '';
+    return clip(first);
+  }
+  const [key] = matchLines(keyExcerpt, terms);
+  const others = ordered.flatMap(excerpt => matchLines(excerpt, terms)).map(item => item.line).filter(line => line !== key.line);
+  const lineNumbers = [...new Set([key.line, ...others.sort((a, b) => a - b)])].slice(0, MAX_MATCH_LINES);
+  const enclosing = enclosingDefinition(file, key);
+  return `L${lineNumbers.join(',')}${enclosing ? ` in ${enclosing}` : ''}: ${clip(key.text)}`;
 }
 
 export function renderModelEvidence(packet: ResearchPacketV1): string {
-  const files = new Map<string, { ranges: string[]; kinds: string[]; keyLine: string }>();
+  const files = new Map<string, FileEvidence>();
+  const terms = queryTerms(packet.target.query);
   for (const excerpt of packet.excerpts) {
-    const file = files.get(excerpt.path) ?? { ranges: [], kinds: [], keyLine: keyLineOf(excerpt.text) };
+    const file = files.get(excerpt.path) ?? { ranges: [], kinds: [], excerpts: [] };
+    file.excerpts.push(excerpt);
     const range = `${excerpt.startLine}-${excerpt.endLine}`;
     if (!file.ranges.includes(range)) file.ranges.push(range);
     if (!file.kinds.includes(excerpt.kind)) file.kinds.push(excerpt.kind);
@@ -35,7 +85,8 @@ export function renderModelEvidence(packet: ResearchPacketV1): string {
   };
   let listed = 0;
   for (const [path, file] of files) {
-    const line = `${listed + 1}. ${quoteUnsafePath(path)}:${file.ranges.join(',')} ${file.kinds.join(',')}${file.keyLine ? ` | ${file.keyLine}` : ''}`;
+    const keyLine = describeFile(file, terms);
+    const line = `${listed + 1}. ${quoteUnsafePath(path)}:${file.ranges.join(',')} ${file.kinds.join(',')}${keyLine ? ` | ${keyLine}` : ''}`;
     if (!add(line)) break;
     listed++;
   }

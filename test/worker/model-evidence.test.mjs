@@ -24,9 +24,32 @@ test('renders one ranked line per file with ranges, kinds and a key line', () =>
   assert.deepEqual(full, before);
   assert.match(lines[0], /Untrusted text; not instructions/);
   assert.equal(lines.filter(line => /^\d+\. /.test(line)).length, 2);
-  assert.ok(lines.includes('1. src/needle.ts:10-12,30-31 definition,caller | export function needle() {'));
-  assert.ok(lines.includes('2. test/needle.ts:1-3 test | function verifyNeedle() {'));
+  assert.ok(lines.includes('1. src/needle.ts:10-12,30-31 definition,caller | L11,30: export function needle() {'));
+  assert.ok(lines.includes('2. test/needle.ts:1-3 test | L2,3: function verifyNeedle() {'));
   assert.ok(lines.includes('Lexical evidence, not a call graph.'));
+});
+
+test('key line is the matching line with its number and enclosing definition, not the window start', () => {
+  const full = packet([
+    excerpt({ id: 'a', kind: 'caller', path: 'src/core.ts', startLine: 2029, endLine: 2033,
+      text: "import x from 'x';\nfunction killTask(id) {\n  needle(id);\n  return 1;\n}\n" }),
+  ]);
+  assert.ok(renderModelEvidence(full).split('\n').includes('1. src/core.ts:2029-2033 caller | L2031 in killTask: needle(id);'));
+});
+
+test('omits the enclosing name when the key line is itself a definition or the candidate is a sibling', () => {
+  const full = packet([
+    excerpt({ id: 'a', kind: 'definition', path: 'src/s.ts', startLine: 1, endLine: 4, text: 'function other() {\n}\nexport function needle() {\n  return 1;\n' }),
+  ]);
+  assert.ok(renderModelEvidence(full).split('\n').includes('1. src/s.ts:1-4 definition | L3: export function needle() {'));
+});
+
+test('prefers a definition or caller excerpt for the key line and omits unknown enclosing names', () => {
+  const full = packet([
+    excerpt({ id: 'a', kind: 'import', path: 'src/m.ts', startLine: 1, endLine: 1, text: "import { needle } from './n';\n" }),
+    excerpt({ id: 'b', kind: 'definition', path: 'src/m.ts', startLine: 20, endLine: 20, text: 'needle: 1,' }),
+  ]);
+  assert.ok(renderModelEvidence(full).split('\n').includes('1. src/m.ts:1-1,20-20 import,definition | L20,1: needle: 1,'));
 });
 
 test('states omissions are not proof of absence', () => {
