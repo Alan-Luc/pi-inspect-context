@@ -44,6 +44,25 @@ test('omits the enclosing name when the key line is itself a definition or the c
   assert.ok(renderModelEvidence(full).split('\n').includes('1. src/s.ts:1-4 definition | L3: export function needle() {'));
 });
 
+test('names an enclosing definition only from the key line excerpt, not a distant excerpt of the same file', () => {
+  const full = packet([
+    excerpt({ id: 'a', kind: 'caller', path: 'src/far.ts', startLine: 500, endLine: 502, text: 'const x = 1;\n  needle(x);\nconst y = 2;\n' }),
+    excerpt({ id: 'b', kind: 'match', path: 'src/far.ts', startLine: 10, endLine: 12, text: 'function foo() {\n  return 1;\n}\n' }),
+  ]);
+  assert.ok(renderModelEvidence(full).split('\n').includes('1. src/far.ts:500-502,10-12 caller,match | L501: needle(x);'));
+});
+
+test('clips a very long enclosing name so the map keeps later files', () => {
+  const name = 'a'.repeat(5000);
+  const full = packet([
+    excerpt({ id: 'a', kind: 'caller', path: 'src/min.js', startLine: 1, endLine: 2, text: `function ${name}() {\n  needle();\n` }),
+    excerpt({ id: 'b', kind: 'caller', path: 'src/next.ts', startLine: 1, endLine: 1, text: 'needle();\n' }),
+  ]);
+  const lines = renderModelEvidence(full).split('\n');
+  assert.ok(lines.some(line => line.startsWith('1. src/min.js:')));
+  assert.ok(lines.some(line => line.startsWith('2. src/next.ts:')));
+});
+
 test('prefers a definition or caller excerpt for the key line and omits unknown enclosing names', () => {
   const full = packet([
     excerpt({ id: 'a', kind: 'import', path: 'src/m.ts', startLine: 1, endLine: 1, text: "import { needle } from './n';\n" }),

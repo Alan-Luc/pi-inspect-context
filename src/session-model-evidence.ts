@@ -34,10 +34,10 @@ function matchLines(excerpt: Excerpt, terms: string[]) {
 
 const indentOf = (text: string) => text.length - text.trimStart().length;
 
-function enclosingDefinition(file: FileEvidence, match: { line: number; text: string }): string | undefined {
+function enclosingDefinition(excerpt: Excerpt, match: { line: number; text: string }): string | undefined {
   if (definitionLine.test(match.text)) return undefined;
   let found: { line: number; name: string } | undefined;
-  for (const excerpt of file.excerpts) for (const item of numberedLines(excerpt)) {
+  for (const item of numberedLines(excerpt)) {
     const name = definitionLine.exec(item.text);
     if (name && item.line < match.line && indentOf(item.text) < indentOf(match.text) && (!found || item.line > found.line)) found = { line: item.line, name: name[1] ?? name[2] };
   }
@@ -60,8 +60,8 @@ function describeFile(file: FileEvidence, terms: string[]): string {
   const [key] = matchLines(keyExcerpt, terms);
   const others = ordered.flatMap(excerpt => matchLines(excerpt, terms)).map(item => item.line).filter(line => line !== key.line);
   const lineNumbers = [...new Set([key.line, ...others.sort((a, b) => a - b)])].slice(0, MAX_MATCH_LINES);
-  const enclosing = enclosingDefinition(file, key);
-  return `L${lineNumbers.join(',')}${enclosing ? ` in ${enclosing}` : ''}: ${clip(key.text)}`;
+  const enclosing = enclosingDefinition(keyExcerpt, key);
+  return `L${lineNumbers.join(',')}${enclosing ? ` in ${clip(enclosing)}` : ''}: ${clip(key.text)}`;
 }
 
 export function renderModelEvidence(packet: ResearchPacketV1): string {
