@@ -43,6 +43,9 @@ test("registers the closed-world read-only tool metadata", async () => {
 		assert.match(tool.description, /skips \.harness, \.pi/);
 		assert.match(tool.description, /ranked file map with line ranges and one key line per file/);
 		assert.doesNotMatch(tool.description, /excerpts|bodyComplete/);
+		assert.match(tool.promptSnippet ?? "", /ranked file map/);
+		assert.deepEqual(tool.promptGuidelines?.length, 1);
+		assert.match(tool.promptGuidelines?.[0] ?? "", /^Start reconnaissance with inspect_context, before grep or find/);
 		assert.match(tool.description, /gitignored files, and paths outside the repository/);
 		assert.match(tool.description, /loadUserProfile/);
 		assert.match(tool.description, /\/health\/ready/);

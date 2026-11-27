@@ -430,6 +430,8 @@ export const inspectContextToolDefinition = {
 	name: "inspect_context",
 	label: "Inspect context",
 	description: "Call this first, before grep, find, or reading files, when you start exploring a repository to locate code, configuration, or tests: one call returns a ranked file map with line ranges and one key line per file; read the listed paths next. Query with one short symbol, route, config key, path fragment, or concept; exact identifiers such as loadUserProfile, /health/ready, and CACHE_CONFIG_PATH work best. For a task spanning multiple seams, combine 2-5 exact anchors in one query, use the returned paths first, and repeat only for a missing branch. It searches tracked and untracked source files inside the repository root only. It skips .harness, .pi, and similar tool directories, dependency directories (node_modules, vendor), generated output (dist, build), gitignored files, and paths outside the repository; use grep, find, or read for those. Results are read-only discovery aids: zero, weak, or materially omitted evidence is not proof of absence; use ordinary repository investigation when needed. Git-index search may miss edits hidden by assume-unchanged and Unicode case variants of ASCII queries in clean tracked files.",
+	promptSnippet: "Locate code, configuration, and tests in one local call; returns a ranked file map",
+	promptGuidelines: ["Start reconnaissance with inspect_context, before grep or find, including when you already know the exact identifier. One read-only inspect_context call returns the definition, callers, and tests. Use grep and find only for gaps."],
 	parameters: INSPECT_CONTEXT_PARAMETERS,
 	outputSchema: RESEARCH_PACKET_V1_SCHEMA,
 	executionMode: "sequential" as const,
